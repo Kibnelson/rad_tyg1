@@ -3,6 +3,8 @@
 Start with one system below. Its runbook takes you from installing the tools
 to running a small test, then downloading and processing more documents.
 Each system has its own branch and clone folder, so you can try several systems.
+Run commands use **30 worker threads** on a VM with at least **30 available
+logical CPUs**; a 32-vCPU VM is recommended.
 
 | System | Branch | Start here |
 |---|---|---|
