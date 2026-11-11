@@ -1,0 +1,40 @@
+{
+  "kind": "public_streaming_install_fixture_v1",
+  "purpose": "Functional installation and stream/partition tests, not benchmark measurements or quality ground truth.",
+  "files": {
+    "sample.jsonl": {
+      "rows": 320,
+      "bytes": 168002,
+      "sha256": "e21cb1c105592c5eb55f8f3e246a2dff786816adbc7f625aac7e14e7bbad4bbb"
+    },
+    "s3_sample.jsonl": {
+      "rows": 16,
+      "bytes": 3861,
+      "sha256": "30f49052258af62387b13b5c9d2b571705978428945bdd26c439fdfb8d264517"
+    }
+  },
+  "authored_unique_documents": 200,
+  "s3_excerpt_documents": 16,
+  "exact_repeat_documents": 104,
+  "source": {
+    "full_text": true,
+    "text_edits": false,
+    "order": "source order",
+    "requested_rows": 16,
+    "source": "s3",
+    "uri": "s3://fuzzydedupe/data/lm1b/lm1b_30M/",
+    "objects": [
+      {
+        "key": "data/lm1b/lm1b_30M/part_0001.parquet",
+        "bytes": 29174577,
+        "etag": "\"2019717e9b5327f791ca3cf884cb7fac-4\""
+      }
+    ],
+    "rows": 16,
+    "sha256": "57025f7683ed6e151dd94327bccb27eed3fb4698f498b294e5ee6fd50daf6ef4",
+    "file": "rad_tyg1_lm1b_sample.jsonl"
+  },
+  "s3_excerpt_policy": "First20 whitespace-delimited words of each of the first16 LM1B source rows; the complete source texts are not included.",
+  "labels": "fixture_copy_of marks copies introduced solely for functional tests. Source IDs are retained; id is the fixture row ordinal.",
+  "text_policy_for_real_downloads": "get_data.py preserves full source text without cropping, editing, shuffling or injecting duplicates."
+}

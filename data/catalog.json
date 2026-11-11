@@ -1,0 +1,6 @@
+{
+  "c4": {"uri": "s3://fuzzydedupe/data/c4/c4_30M/", "text_column": "contents", "id_column": "int_id_column"},
+  "cc_main": {"uri": "s3://fuzzydedupe/data/cc_main/cc_main_30M/", "text_column": "contents", "id_column": "int_id_column"},
+  "lm1b": {"uri": "s3://fuzzydedupe/data/lm1b/lm1b_30M/", "text_column": "contents", "id_column": "int_id_column"},
+  "realnews": {"uri": "s3://fuzzydedupe/data/realnews/realnews_30M/", "text_column": "contents", "id_column": "int_id_column"}
+}
