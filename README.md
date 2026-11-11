@@ -47,8 +47,10 @@ final partial-partition sealing and shutdown are outside processing time and
 inside full local wall time. Build and download time are outside both.
 Processing throughput is screened documents divided by summed processing time.
 
-The result files preserve zero-based stream positions and original source IDs;
-they do not copy input text. The runner screens every input document and starts
+The result files preserve zero-based stream positions and the input `id` values
+(as `source_id`); they do not copy input text. The download keeps any
+available upstream IDs in the input JSONL; join that file through its `id` field
+when mapping results back to the source. The runner screens every input document and starts
 fresh for each run; it does not resume an interrupted run. When comparing
 timings, use the same timer scope, thread count, batch size and partition size.
 
