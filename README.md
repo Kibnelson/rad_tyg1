@@ -1,35 +1,29 @@
 # RAD and streaming deduplication baselines
 
-Choose one system branch. Each branch has its own setup, a small included
-fixture, a streaming runner and a short runbook.
+Start with one system below. Its runbook takes you from installing the tools
+to running a small test, then downloading and processing more documents.
+Each system has its own branch and clone folder, so you can try several systems.
 
-| System | Branch | Instructions |
+| System | Branch | Start here |
 |---|---|---|
-| RAD: bitmap HNSW with Bloom routing | [rad](https://github.com/Kibnelson/rad_tyg1/tree/rad) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/rad/RUNBOOK.md) |
-| Milvus: native MinHash-LSH | [milvus](https://github.com/Kibnelson/rad_tyg1/tree/milvus) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md) |
-| SIMD-DPK: full-reference baseline | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/tree/simd_dpk) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/RUNBOOK.md) |
-| Faiss(Jaccard): raw MinHash HNSW | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/tree/faiss_jaccard) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/RUNBOOK.md) |
+| RAD | [rad](https://github.com/Kibnelson/rad_tyg1/tree/rad) | [RAD runbook](https://github.com/Kibnelson/rad_tyg1/blob/rad/RUNBOOK.md) |
+| Milvus | [milvus](https://github.com/Kibnelson/rad_tyg1/tree/milvus) | [Milvus runbook](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md) |
+| SIMD-DPK | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/tree/simd_dpk) | [SIMD-DPK runbook](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/RUNBOOK.md) |
+| Faiss(Jaccard) | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/tree/faiss_jaccard) | [Faiss(Jaccard) runbook](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/RUNBOOK.md) |
 
-Start with the included data; no AWS account is needed for that test:
+[MACHINE_SPECS.md](MACHINE_SPECS.md) lists VM sizes and CPU requirements.
+The runbooks use Ubuntu 24.04 and Python 3.12. They list each system's CPU,
+memory and build requirements before the commands. Native source code is
+included; Milvus builds the custom server and SDK used by this project.
 
-```bash
-git clone --branch rad --single-branch https://github.com/Kibnelson/rad_tyg1.git
-cd rad_tyg1
-# Follow RUNBOOK.md for setup and the sample command.
-```
+The 320-document sample is already in Git and needs no AWS account.
+[DATASETS.md](DATASETS.md) explains how to download public FineWeb/Common Crawl
+text or use the existing S3 datasets if you have bucket access. Larger downloads
+keep full document text and order. Every input document is checked before it
+can be inserted.
 
-The examples target Linux x86-64 and Python 3.10–3.12. Native CPU/build
-requirements differ by system; check the chosen branch before installing.
-Milvus builds the modified server and SDK, not an interchangeable stock image.
-
-[DATASETS.md](DATASETS.md) explains the included S3-derived fixture, the four
-existing S3 dataset prefixes, and public Common Crawl/FineWeb downloads.
-Real-data runs screen every document in batches, starting from an empty index.
-They do not use the synthetic microbenchmark's 900K-corpus/100K-query split.
-
-Run outputs record the selected parameters and measured counters/timings.
-The included fixture validates installation and stream processing; it does not
-reproduce the paper's large-run throughput or establish recall on real data.
-[Installation checks and remaining validation](VALIDATION.md) are recorded
-separately from the run instructions.
-[Source and data notices](NOTICE.md) retain upstream attribution.
+The small sample checks installation and insert/drop handling. Its timings
+are not paper benchmark results, and real-data recall is not measured.
+[VALIDATION.md](VALIDATION.md) records the checks completed so far;
+Milvus's full custom-server build and streaming test are still pending.
+[NOTICE.md](NOTICE.md) records source and data attribution.
