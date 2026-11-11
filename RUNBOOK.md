@@ -20,20 +20,22 @@ PYTHON=python3.12 JOBS=4 bash setup.sh
 Setup builds the included modified Faiss and checks native distance, identity
 search and save/reload. The ordinary `faiss-cpu` package cannot run this engine.
 
+`JOBS` limits compilation only; run commands below use 30 workers.
+
 ## 2. Test the included data
 
 No download or AWS account is needed:
 
 ```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 4 --batch-size 100 --partition-capacity 1000
+  --threads 30 --batch-size 100 --partition-capacity 1000
 cat results/sample/summary.json
 ```
 
 On success, `screened` is **320** and `inserted` + `index_search_drops` +
 `in_batch_dedup_drops` totals 320. Individual counts can vary because HNSW is
-approximate. These are installation checks, not benchmark scores. Use fewer
-threads if your VM has fewer than four available CPUs.
+approximate. These are installation checks, not benchmark scores. Use a VM
+with at least 30 available logical CPUs for these commands.
 
 ## 3. Download and test more data
 
@@ -43,7 +45,7 @@ This downloads 100,000 full FineWeb documents, keeping their order:
 .venv/bin/python -m pip install -r requirements-data.txt
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
-  --output results/fineweb --threads 4 --batch-size 10000 --partition-capacity 100000
+  --output results/fineweb --threads 30 --batch-size 10000 --partition-capacity 100000
 cat results/fineweb/summary.json
 ```
 
@@ -57,7 +59,7 @@ when repeating a test. Input documents keep their full text.
 ## 4. Run longer jobs
 
 Use `tmux new -As faiss-jaccard`, then run the command inside it. `nproc` shows
-your VM's available CPUs; keep `--threads` within that count. Each run starts
+your VM's available CPUs; these commands require at least 30. Each run starts
 fresh and cannot resume. Tune `--M`, `--ef-construction`, `--ef-search`, `--top-k` and
 `--cutoff` explicitly for another configuration.
 

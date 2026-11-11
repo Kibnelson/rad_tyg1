@@ -1,5 +1,9 @@
 # Validation
 
+The commands below record earlier checks. Current runbook commands use 30
+worker threads; these earlier tests used four.
+
+
 The bundled engine was built from source on Linux x86-64 with Python 3.10.22,
 AVX-512 and four build jobs. Setup's native checks compare all 113 possible
 matching-position counts against the saved raw-MinHash distance rule, check an

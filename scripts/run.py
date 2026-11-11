@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -16,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--threads', type=int, default=28)
+    parser.add_argument('--threads', type=int, default=30)
     parser.add_argument('--batch-size', type=int, default=10000)
     parser.add_argument('--max-documents', type=int)
     parser.add_argument('--partition-capacity', type=int, default=20000000,
@@ -27,6 +28,8 @@ def main():
     parser.add_argument('--top-k', type=int, default=40)
     parser.add_argument('--cutoff', type=int, default=30)
     args = parser.parse_args()
+    if args.threads > len(os.sched_getaffinity(0)):
+        parser.error('--threads exceeds available logical CPUs')
     if min(args.threads, args.batch_size, args.partition_capacity, args.M, args.ef_construction, args.ef_search, args.top_k) < 1 or not 0 <= args.cutoff <= 100:
         parser.error('Invalid positive count or distance cutoff')
     if args.max_documents is not None and args.max_documents < 1:
