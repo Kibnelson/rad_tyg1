@@ -1,0 +1,635 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package compactor
+
+import (
+	"context"
+	"math"
+	"testing"
+	"time"
+
+	"github.com/bytedance/mockey"
+	"github.com/samber/lo"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/compaction"
+	"github.com/milvus-io/milvus/internal/mocks"
+	"github.com/milvus-io/milvus/internal/mocks/flushcommon/mock_util"
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
+	"github.com/milvus-io/milvus/internal/util/initcore"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
+)
+
+func TestSortCompactionTaskSuite(t *testing.T) {
+	suite.Run(t, new(SortCompactionTaskSuite))
+}
+
+func TestSortInitLOBCompactionContextKeepsReuseAllDecisionWithoutLobFiles(t *testing.T) {
+	paramtable.Get().Init(paramtable.NewBaseTable())
+	textFieldIDs := []int64{101, 102}
+	params := compaction.GenParams()
+	collectionID, partitionID := int64(10), int64(20)
+	task := &sortCompactionTask{
+		collectionID: collectionID,
+		partitionID:  partitionID,
+		segmentID:    100,
+		manifest: packed.MarshalManifestPath(
+			storage.SegmentManifestBasePath(params.StorageConfig.GetRootPath(), collectionID, partitionID, 100), 1),
+		plan: &datapb.CompactionPlan{
+			Type: datapb.CompactionType_SortCompaction,
+			Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+				{FieldID: textFieldIDs[0], Name: "text_1", DataType: schemapb.DataType_Text},
+				{FieldID: textFieldIDs[1], Name: "text_2", DataType: schemapb.DataType_Text},
+			}},
+		},
+		compactionParams: params,
+	}
+	collectPatch := mockey.Mock(compaction.CollectLobFilesFromManifests).Return(map[int64][]packed.LobFileInfo{
+		100: {},
+	}, nil).Build()
+	defer collectPatch.UnPatch()
+
+	err := task.initLOBCompactionContext(context.Background())
+	assert.NoError(t, err)
+	if assert.NotNil(t, task.lobContext) {
+		assert.True(t, task.lobContext.HasReuseAllFields())
+		assert.False(t, task.lobContext.ShouldRewriteAnyField())
+		assert.Len(t, task.lobContext.Decisions, len(textFieldIDs))
+		for _, fieldID := range textFieldIDs {
+			assert.Equal(t, compaction.LOBStrategyReuseAll, task.lobContext.Decisions[fieldID].Strategy)
+		}
+	}
+}
+
+func TestSortInitLOBCompactionContextRewritesAcrossPartitionBases(t *testing.T) {
+	paramtable.Get().Init(paramtable.NewBaseTable())
+	params := compaction.GenParams()
+	task := &sortCompactionTask{
+		collectionID: 10,
+		partitionID:  20,
+		segmentID:    100,
+		manifest: packed.MarshalManifestPath(
+			params.StorageConfig.GetRootPath()+"/files/insert_log/10/20/100", 1),
+		plan: &datapb.CompactionPlan{
+			Type: datapb.CompactionType_SortCompaction,
+			Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+				{FieldID: 101, Name: "text", DataType: schemapb.DataType_Text},
+			}},
+		},
+		compactionParams: params,
+	}
+	collectPatch := mockey.Mock(compaction.CollectLobFilesFromManifests).Return(
+		map[int64][]packed.LobFileInfo{100: {{FieldID: 101, TotalRows: 1, ValidRows: 1}}}, nil,
+	).Build()
+	defer collectPatch.UnPatch()
+
+	err := task.initLOBCompactionContext(context.Background())
+	assert.NoError(t, err)
+	if assert.NotNil(t, task.lobContext) {
+		assert.False(t, task.lobContext.HasReuseAllFields())
+		assert.True(t, task.lobContext.ShouldRewriteAnyField())
+		assert.Equal(t, compaction.LOBStrategyRewriteAll, task.lobContext.GetStrategy(101))
+	}
+}
+
+type SortCompactionTaskSuite struct {
+	suite.Suite
+
+	mockChunkManager *mocks.ChunkManager
+	mockBinlogIO     *mock_util.MockBinlogIO
+	meta             *etcdpb.CollectionMeta
+	segWriter        *SegmentWriter
+
+	task *sortCompactionTask
+}
+
+func (s *SortCompactionTaskSuite) SetupSuite() {
+	paramtable.Get().Init(paramtable.NewBaseTable())
+}
+
+func (s *SortCompactionTaskSuite) setupTest() {
+	s.mockChunkManager = mocks.NewChunkManager(s.T())
+	s.mockBinlogIO = mock_util.NewMockBinlogIO(s.T())
+	s.meta = genTestCollectionMeta()
+
+	params, err := compaction.GenerateJSONParams(s.meta.GetSchema())
+	s.NoError(err)
+
+	plan := &datapb.CompactionPlan{
+		PlanID: 999,
+		SegmentBinlogs: []*datapb.CompactionSegmentBinlogs{{
+			SegmentID:           100,
+			FieldBinlogs:        nil,
+			Field2StatslogPaths: nil,
+			Deltalogs:           nil,
+		}},
+		Type:                   datapb.CompactionType_SortCompaction,
+		Schema:                 s.meta.GetSchema(),
+		PreAllocatedSegmentIDs: &datapb.IDRange{Begin: 19531, End: math.MaxInt64},
+		PreAllocatedLogIDs:     &datapb.IDRange{Begin: 9530, End: 19530},
+		MaxSize:                64 * 1024 * 1024,
+		SlotUsage:              8,
+		JsonParams:             params,
+		TotalRows:              1000,
+		CollectionTtl:          time.Since(getMilvusBirthday().Add(-time.Hour)).Nanoseconds(),
+	}
+
+	pk, err := typeutil.GetPrimaryFieldSchema(plan.GetSchema())
+	s.NoError(err)
+
+	s.task = NewSortCompactionTask(context.Background(), s.mockChunkManager, plan, compaction.GenParams(), []int64{pk.GetFieldID()})
+	s.task.binlogIO = s.mockBinlogIO
+}
+
+func (s *SortCompactionTaskSuite) SetupTest() {
+	paramtable.Get().Save(paramtable.Get().CommonCfg.StorageType.Key, "local")
+	paramtable.Get().Save(paramtable.Get().CommonCfg.UseLoonFFI.Key, "false")
+	paramtable.Get().Save(paramtable.Get().LocalStorageCfg.Path.Key, s.T().TempDir())
+	initcore.InitStorageV2FileSystem(paramtable.Get())
+	s.setupTest()
+}
+
+func (s *SortCompactionTaskSuite) TearDownTest() {
+	paramtable.Get().Reset(paramtable.Get().CommonCfg.StorageType.Key)
+	paramtable.Get().Reset(paramtable.Get().CommonCfg.UseLoonFFI.Key)
+	paramtable.Get().Reset(paramtable.Get().LocalStorageCfg.Path.Key)
+	initcore.CleanArrowFileSystem()
+}
+
+func (s *SortCompactionTaskSuite) TestNewSortCompactionTask() {
+	plan := &datapb.CompactionPlan{
+		PlanID:    123,
+		Type:      datapb.CompactionType_SortCompaction,
+		SlotUsage: 8,
+		Schema:    s.meta.GetSchema(),
+	}
+
+	pk, err := typeutil.GetPrimaryFieldSchema(plan.GetSchema())
+	s.NoError(err)
+
+	task := NewSortCompactionTask(context.Background(), s.mockChunkManager, plan, compaction.GenParams(), []int64{pk.GetFieldID()})
+
+	s.NotNil(task)
+	s.Equal(plan.GetPlanID(), task.GetPlanID())
+	s.Equal(datapb.CompactionType_SortCompaction, task.GetCompactionType())
+	s.Equal(int64(8), task.GetSlotUsage())
+}
+
+func (s *SortCompactionTaskSuite) TestPreCompactValidation() {
+	// Test with multiple segments (should fail)
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{SegmentID: 100},
+		{SegmentID: 101},
+	}
+
+	err := s.task.preCompact()
+	s.Error(err)
+	s.Contains(err.Error(), "sort compaction should handle exactly one segment")
+
+	// Test with single segment (should pass basic validation)
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{
+			SegmentID:    100,
+			CollectionID: 1001,
+			PartitionID:  1002,
+			FieldBinlogs: []*datapb.FieldBinlog{},
+			Deltalogs:    []*datapb.FieldBinlog{},
+		},
+	}
+
+	err = s.task.preCompact()
+	s.NoError(err)
+	s.Equal(int64(1001), s.task.collectionID)
+	s.Equal(int64(1002), s.task.partitionID)
+	s.Equal(int64(100), s.task.segmentID)
+}
+
+func (s *SortCompactionTaskSuite) prepareSortCompactionTask() {
+	segmentID := int64(1001)
+	alloc := allocator.NewLocalAllocator(100, math.MaxInt64)
+	s.mockBinlogIO.EXPECT().Upload(mock.Anything, mock.Anything).Return(nil)
+
+	// Initialize segment buffer with test data
+	s.initSegBuffer(1000, segmentID)
+	kvs, fBinlogs, err := serializeWrite(context.TODO(), alloc, s.segWriter)
+	s.Require().NoError(err)
+
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.MatchedBy(func(keys []string) bool {
+		left, right := lo.Difference(keys, lo.Keys(kvs))
+		return len(left) == 0 && len(right) == 0
+	})).Return(lo.Values(kvs), nil).Once()
+
+	// Create delta log for deletion
+	deleteTs := tsoutil.ComposeTSByTimeWithLogical(getMilvusBirthday(), 5)
+	blob, err := getInt64DeltaBlobs(segmentID, []int64{segmentID}, []uint64{deleteTs})
+	s.Require().NoError(err)
+	deltaPath := "deltalog/1001"
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, []string{deltaPath}).
+		Return([][]byte{blob.GetValue()}, nil).Once()
+
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{
+			SegmentID:    segmentID,
+			CollectionID: CollectionID,
+			PartitionID:  PartitionID,
+			FieldBinlogs: lo.Values(fBinlogs),
+			Deltalogs: []*datapb.FieldBinlog{
+				{Binlogs: []*datapb.Binlog{{LogPath: deltaPath}}},
+			},
+		},
+	}
+}
+
+// parallelChunkReadSeen runs one sort compaction and returns every value the
+// sort handed to storage.WithParallelChunkRead.
+func (s *SortCompactionTaskSuite) parallelChunkReadSeen() []storage.ParallelChunkRead {
+	var seen []storage.ParallelChunkRead
+	var origin func(storage.ParallelChunkRead) storage.RwOption
+	mock := mockey.Mock(storage.WithParallelChunkRead).To(func(p storage.ParallelChunkRead) storage.RwOption {
+		seen = append(seen, p)
+		return origin(p)
+	}).Origin(&origin).Build()
+	defer mock.UnPatch()
+
+	s.prepareSortCompactionTask()
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.Equal(datapb.CompactionTaskState_completed, result.GetState())
+	return seen
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionReadOptionsDefault() {
+	s.Equal([]storage.ParallelChunkRead{{
+		Concurrency: min(hardware.GetCPUNum(), 8),
+		BufferSize:  512 * 1024 * 1024,
+	}}, s.parallelChunkReadSeen(), "the input reader must be opened once, with the default read options")
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionReadOptionsFollowConfig() {
+	cfg := &paramtable.Get().DataNodeCfg
+	paramtable.Get().Save(cfg.SortReadConcurrency.Key, "3")
+	defer paramtable.Get().Reset(cfg.SortReadConcurrency.Key)
+	paramtable.Get().Save(cfg.SortReadBufferSize.Key, "16m")
+	defer paramtable.Get().Reset(cfg.SortReadBufferSize.Key)
+
+	s.Equal([]storage.ParallelChunkRead{{
+		Concurrency: 3,
+		BufferSize:  16 * 1024 * 1024,
+	}}, s.parallelChunkReadSeen(), "both settings must reach the reader")
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionReadOptionsSerialWhenSwitchedOff() {
+	cfg := &paramtable.Get().DataNodeCfg
+	paramtable.Get().Save(cfg.SortReadConcurrency.Key, "1")
+	defer paramtable.Get().Reset(cfg.SortReadConcurrency.Key)
+
+	seen := s.parallelChunkReadSeen()
+	s.Len(seen, 1)
+	s.Equal(1, seen[0].Concurrency, "1 is the way to get the serial reader back")
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionBasic() {
+	s.prepareSortCompactionTask()
+
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.NotNil(result)
+
+	s.Equal(s.task.plan.GetPlanID(), result.GetPlanID())
+	s.Equal(datapb.CompactionTaskState_completed, result.GetState())
+	s.Equal(datapb.CompactionType_SortCompaction, result.GetType())
+	s.Equal(1, len(result.GetSegments()))
+
+	segment := result.GetSegments()[0]
+	s.EqualValues(19531, segment.GetSegmentID())
+	s.True(segment.GetIsSorted()) // Sort compaction should mark segment as sorted
+	// s.EqualValues(len(s.task.plan.Schema.Fields), len(segment.InsertLogs))
+	s.EqualValues(1, len(segment.Field2StatslogPaths))
+	s.Empty(segment.Deltalogs)
+	// delete 5 counts
+	s.Equal(int64(995), segment.GetNumOfRows())
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionWithBM25() {
+	s.setupBM25Test()
+	s.prepareSortCompactionWithBM25Task()
+
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.NotNil(result)
+
+	s.Equal(s.task.plan.GetPlanID(), result.GetPlanID())
+	s.Equal(1, len(result.GetSegments()))
+
+	segment := result.GetSegments()[0]
+	s.EqualValues(19531, segment.GetSegmentID())
+	s.True(segment.GetIsSorted())
+	// s.EqualValues(len(s.task.plan.Schema.Fields), len(segment.InsertLogs))
+	s.EqualValues(1, len(segment.Field2StatslogPaths))
+	s.EqualValues(1, len(segment.Bm25Logs)) // Should have BM25 logs
+	s.Empty(segment.Deltalogs)
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionMaterializesMissingBM25OutputFromOldSegment() {
+	s.setupBM25Test()
+	s.prepareSortCompactionWithBM25Task(102)
+
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.NotNil(result)
+
+	segment := result.GetSegments()[0]
+	s.EqualValues(1, segment.GetNumOfRows())
+	s.True(segment.GetIsSorted())
+	s.EqualValues(1, fieldBinlogEntriesForTest(segment.GetBm25Logs(), 102))
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionPrefillsMissingBM25InputBeforeOutput() {
+	s.setupBM25Test()
+	typeutil.GetField(s.task.plan.GetSchema(), 101).Nullable = true
+	s.prepareSortCompactionWithBM25Task(101, 102)
+
+	result, err := s.task.Compact()
+	s.Require().NoError(err)
+	s.Require().NotNil(result)
+	s.EqualValues(1, fieldBinlogEntriesForTest(result.GetSegments()[0].GetInsertLogs(), 101))
+	s.EqualValues(1, fieldBinlogEntriesForTest(result.GetSegments()[0].GetBm25Logs(), 102))
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionMaterializesNullableAddedFieldFromOldSegment() {
+	segmentID := int64(1001)
+	alloc := allocator.NewLocalAllocator(100, math.MaxInt64)
+	s.mockBinlogIO.EXPECT().Upload(mock.Anything, mock.Anything).Return(nil)
+
+	s.initSegBuffer(1, segmentID)
+	kvs, fBinlogs, err := serializeWrite(context.TODO(), alloc, s.segWriter)
+	s.Require().NoError(err)
+	removeFieldBinlogForTest(kvs, fBinlogs, StringField)
+
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.MatchedBy(func(keys []string) bool {
+		left, right := lo.Difference(keys, lo.Keys(kvs))
+		return len(left) == 0 && len(right) == 0
+	})).RunAndReturn(func(ctx context.Context, keys []string) ([][]byte, error) {
+		return downloadValuesForPathsForTest(kvs, keys)
+	}).Once()
+
+	s.task.plan.TotalRows = 1
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{
+			SegmentID:    segmentID,
+			CollectionID: CollectionID,
+			PartitionID:  PartitionID,
+			FieldBinlogs: lo.Values(fBinlogs),
+		},
+	}
+
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.NotNil(result)
+
+	segment := result.GetSegments()[0]
+	s.EqualValues(1, segment.GetNumOfRows())
+	s.True(segment.GetIsSorted())
+	s.EqualValues(1, fieldBinlogEntriesForTest(segment.GetInsertLogs(), StringField))
+}
+
+func (s *SortCompactionTaskSuite) setupBM25Test() {
+	s.mockBinlogIO = mock_util.NewMockBinlogIO(s.T())
+	s.mockChunkManager = mocks.NewChunkManager(s.T())
+	s.meta = genTestCollectionMetaWithBM25()
+	params, err := compaction.GenerateJSONParams(s.meta.GetSchema())
+	if err != nil {
+		panic(err)
+	}
+
+	plan := &datapb.CompactionPlan{
+		PlanID: 999,
+		SegmentBinlogs: []*datapb.CompactionSegmentBinlogs{{
+			SegmentID:           100,
+			FieldBinlogs:        nil,
+			Field2StatslogPaths: nil,
+			Deltalogs:           nil,
+		}},
+		Type:                   datapb.CompactionType_SortCompaction,
+		Schema:                 s.meta.GetSchema(),
+		PreAllocatedSegmentIDs: &datapb.IDRange{Begin: 19531, End: math.MaxInt64},
+		PreAllocatedLogIDs:     &datapb.IDRange{Begin: 9530, End: 19530},
+		MaxSize:                64 * 1024 * 1024,
+		JsonParams:             params,
+		TotalRows:              1,
+	}
+
+	pk, err := typeutil.GetPrimaryFieldSchema(plan.GetSchema())
+	s.NoError(err)
+
+	s.task = NewSortCompactionTask(context.Background(), s.mockChunkManager, plan, compaction.GenParams(), []int64{pk.GetFieldID()})
+	s.task.binlogIO = s.mockBinlogIO
+}
+
+func (s *SortCompactionTaskSuite) prepareSortCompactionWithBM25Task(removeFieldIDs ...int64) {
+	segmentID := int64(1001)
+	alloc := allocator.NewLocalAllocator(100, math.MaxInt64)
+	s.mockBinlogIO.EXPECT().Upload(mock.Anything, mock.Anything).Return(nil)
+
+	s.initSegBufferWithBM25(segmentID)
+	kvs, fBinlogs, err := serializeWrite(context.TODO(), alloc, s.segWriter)
+	s.Require().NoError(err)
+	for _, fieldID := range removeFieldIDs {
+		removeFieldBinlogForTest(kvs, fBinlogs, fieldID)
+	}
+
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.MatchedBy(func(keys []string) bool {
+		left, right := lo.Difference(keys, lo.Keys(kvs))
+		return len(left) == 0 && len(right) == 0
+	})).RunAndReturn(func(ctx context.Context, keys []string) ([][]byte, error) {
+		return downloadValuesForPathsForTest(kvs, keys)
+	}).Once()
+
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{
+			SegmentID:    segmentID,
+			CollectionID: CollectionID,
+			PartitionID:  PartitionID,
+			FieldBinlogs: lo.Values(fBinlogs),
+		},
+	}
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionWithExpiredData() {
+	segmentID := int64(1001)
+
+	s.initSegBuffer(1000, segmentID)
+	collTTL := 864000 // 10 days
+	s.task.currentTime = getMilvusBirthday().Add(time.Second * (time.Duration(collTTL) + 1))
+	s.task.plan.CollectionTtl = int64(collTTL)
+	alloc := allocator.NewLocalAllocator(888888, math.MaxInt64)
+
+	kvs, fBinlogs, err := serializeWrite(context.TODO(), alloc, s.segWriter)
+	s.Require().NoError(err)
+
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, paths []string) ([][]byte, error) {
+			s.Require().Equal(len(paths), len(kvs))
+			return lo.Values(kvs), nil
+		})
+	s.mockBinlogIO.EXPECT().Upload(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{
+		{
+			SegmentID:    segmentID,
+			CollectionID: CollectionID,
+			PartitionID:  PartitionID,
+			FieldBinlogs: lo.Values(fBinlogs),
+		},
+	}
+
+	result, err := s.task.Compact()
+	s.NoError(err)
+	s.NotNil(result)
+
+	// Due to TTL expiration, some data might be filtered out
+	segment := result.GetSegments()[0]
+	s.True(segment.GetIsSorted())
+}
+
+func (s *SortCompactionTaskSuite) TestSortCompactionFail() {
+	// Test with invalid plan (no segments)
+	s.task.plan.SegmentBinlogs = []*datapb.CompactionSegmentBinlogs{}
+
+	result, err := s.task.Compact()
+	s.NoError(err) // Should not return error, but result should indicate failure
+	s.NotNil(result)
+	s.Equal(datapb.CompactionTaskState_failed, result.GetState())
+}
+
+func (s *SortCompactionTaskSuite) TestTaskInterface() {
+	// Test Compactor interface methods
+	s.Equal(int64(999), s.task.GetPlanID())
+	s.Equal(datapb.CompactionType_SortCompaction, s.task.GetCompactionType())
+	s.Equal(int64(8), s.task.GetSlotUsage())
+
+	// Test task lifecycle
+	s.task.Complete()
+
+	s.task.Stop()
+}
+
+// Helper methods (copied/adapted from mix compaction tests)
+func (s *SortCompactionTaskSuite) initSegBuffer(size int, seed int64) {
+	s.segWriter, _ = NewSegmentWriter(s.meta.GetSchema(), int64(size), compactionBatchSize, 1, PartitionID, CollectionID, []int64{})
+
+	for i := 0; i < size; i++ {
+		v := storage.Value{
+			PK:        storage.NewInt64PrimaryKey(seed),
+			Timestamp: int64(tsoutil.ComposeTSByTimeWithLogical(getMilvusBirthday(), int64(i))),
+			Value:     getRow(seed, int64(tsoutil.ComposeTSByTimeWithLogical(getMilvusBirthday(), int64(i)))),
+		}
+		err := s.segWriter.Write(&v)
+		s.Require().NoError(err)
+	}
+	s.segWriter.FlushAndIsFull()
+}
+
+func (s *SortCompactionTaskSuite) initSegBufferWithBM25(seed int64) {
+	s.segWriter, _ = NewSegmentWriter(s.meta.GetSchema(), 1, compactionBatchSize, 1, PartitionID, CollectionID, []int64{102})
+
+	v := storage.Value{
+		PK:        storage.NewInt64PrimaryKey(seed),
+		Timestamp: int64(tsoutil.ComposeTSByTime(getMilvusBirthday())),
+		Value:     genRowWithBM25(seed),
+	}
+	err := s.segWriter.Write(&v)
+	s.Require().NoError(err)
+	s.segWriter.FlushAndIsFull()
+}
+
+func TestSortCompactionTaskBasic(t *testing.T) {
+	ctx := context.Background()
+	mockChunkManager := mocks.NewChunkManager(t)
+
+	plan := &datapb.CompactionPlan{
+		PlanID: 123,
+		Type:   datapb.CompactionType_SortCompaction,
+		SegmentBinlogs: []*datapb.CompactionSegmentBinlogs{
+			{SegmentID: 100},
+		},
+		Schema: genTestCollectionMeta().GetSchema(),
+	}
+
+	pk, err := typeutil.GetPrimaryFieldSchema(plan.GetSchema())
+	assert.NoError(t, err)
+
+	task := NewSortCompactionTask(ctx, mockChunkManager, plan, compaction.GenParams(), []int64{pk.GetFieldID()})
+
+	assert.NotNil(t, task)
+	assert.Equal(t, int64(123), task.GetPlanID())
+	assert.Equal(t, datapb.CompactionType_SortCompaction, task.GetCompactionType())
+}
+
+func TestLogIfParallelReadIgnored(t *testing.T) {
+	ctx := context.Background()
+	const message = "sort read in parallel is ignored"
+
+	t.Run("manifest with configured parallel read warns", func(t *testing.T) {
+		sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+		logIfParallelReadIgnored(ctx, mlog.With(), 100, storage.StorageV3, "base_path/_metadata/manifest-1", 8, true)
+		assert.Contains(t, sink.String(), message)
+		assert.Contains(t, sink.String(), "manifest", "the reason must name the manifest route")
+		assert.Contains(t, sink.String(), "100", "the segment ID must be in the log")
+		assert.Contains(t, sink.String(), "[WARN]", "an operator's own setting being ignored is a warning")
+	})
+
+	t.Run("StorageV1 segment with configured parallel read warns", func(t *testing.T) {
+		sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+		logIfParallelReadIgnored(ctx, mlog.With(), 100, storage.StorageV1, "", 8, true)
+		assert.Contains(t, sink.String(), message)
+		assert.Contains(t, sink.String(), "StorageV1", "the reason must name the V1 route")
+	})
+
+	// Every unconfigured multi-core DataNode resolves the default to >= 2, so
+	// warning here would fire on clusters that never asked for parallel reads.
+	t.Run("derived concurrency reports at info", func(t *testing.T) {
+		sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+		logIfParallelReadIgnored(ctx, mlog.With(), 100, storage.StorageV3, "base_path/_metadata/manifest-1", 8, false)
+		assert.Contains(t, sink.String(), message, "the no-op is still reported")
+		assert.Contains(t, sink.String(), "[INFO]")
+		assert.NotContains(t, sink.String(), "[WARN]", "a default nobody chose is not a misconfiguration")
+	})
+
+	t.Run("binlog V2 path stays quiet", func(t *testing.T) {
+		sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+		logIfParallelReadIgnored(ctx, mlog.With(), 100, storage.StorageV2, "", 8, true)
+		assert.NotContains(t, sink.String(), message)
+	})
+
+	t.Run("concurrency 1 stays quiet", func(t *testing.T) {
+		sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+		logIfParallelReadIgnored(ctx, mlog.With(), 100, storage.StorageV3, "base_path/_metadata/manifest-1", 1, true)
+		assert.NotContains(t, sink.String(), message)
+	})
+}

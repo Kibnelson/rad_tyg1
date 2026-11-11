@@ -1,0 +1,315 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package paramtable
+
+import (
+	"strings"
+	"time"
+)
+
+type functionConfig struct {
+	BatchFactor                   ParamItem  `refreshable:"true"`
+	ModelRequestTimeout           ParamItem  `refreshable:"true"`
+	TextEmbeddingProviders        ParamGroup `refreshable:"true"`
+	RerankModelProviders          ParamGroup `refreshable:"true"`
+	LocalResourcePath             ParamItem  `refreshable:"true"`
+	LinderaDownloadUrls           ParamGroup `refreshable:"true"`
+	ZillizProviders               ParamGroup `refreshable:"true"`
+	AnalyzerConcurrencyPerCPUCore ParamItem  `refreshable:"true"`
+	AnalyzerRunnerConcurrency     ParamItem  `refreshable:"true"`
+	// EnableWriteBeforeMaterialization gates the write-before function
+	// materialization (streamingnode materializes BM25/embedding function
+	// output fields before WAL append). Default "auto": it is switched on
+	// automatically once the whole cluster has confirmed version >= 2.6.23
+	// (plus the SwitchDelay stability window); before that the write path keeps
+	// the legacy format. Explicit "false" keeps legacy format forever (escape
+	// hatch); explicit "true" force-enables and bypasses the version gate (use
+	// with caution).
+	//
+	// Notes on the auto-switch behavior:
+	//   - The flip is a one-shot decision taken by the MixCoord confirmator:
+	//     once it flips the value to "true" it writes the config-center (etcd)
+	//     key, which then outranks file/env sources per the usual config
+	//     priority. After the flip, the only working override is the etcd
+	//     config-center key itself (`<etcd.rootPath>/config/<key>`); a "false"
+	//     set in milvus.yaml or env afterwards is silently ignored. Explicit
+	//     "false"/"true" set before the flip (in any source) is honored and
+	//     skips the etcd write.
+	//   - Setting "false" at startup makes the gate resolve immediately and the
+	//     confirmator exits; reverting "false" back to "auto" at runtime does
+	//     not re-arm the gate (the confirmator is one-shot), so the flip only
+	//     takes effect after a MixCoord restart. Operators can still intervene
+	//     at any time by setting "true" or "false" explicitly.
+	EnableWriteBeforeMaterialization ParamItem `refreshable:"true"`
+}
+
+func (p *functionConfig) init(base *BaseTable) {
+	p.BatchFactor = ParamItem{
+		Key:          "function.batch_factor.",
+		Version:      "2.6.7",
+		DefaultValue: "5",
+	}
+	p.BatchFactor.Init(base.mgr)
+
+	p.ModelRequestTimeout = ParamItem{
+		Key:          "function.model.requestTimeout",
+		Version:      "2.6.12",
+		DefaultValue: "30s",
+		Export:       true,
+		Doc:          "Global timeout for external model requests, e.g. 30s. Function param timeout_ms overrides it.",
+	}
+	p.ModelRequestTimeout.Init(base.mgr)
+
+	p.TextEmbeddingProviders = ParamGroup{
+		KeyPrefix: "function.textEmbedding.providers.",
+		Version:   "2.6.0",
+		Export:    true,
+		// Provider entries are open-ended, so the group defaults to sensitive.
+		// Keep only the enable switch readable. URLs and resource names are
+		// infrastructure topology and, more importantly, changing one can redirect
+		// a request that carries the separately configured provider credential.
+		Sensitive:            true,
+		NonSensitiveSuffixes: []string{"enable"},
+		DocFunc: func(key string) string {
+			switch key {
+			case "tei.enable":
+				return "Whether to enable TEI model service"
+			case "tei.credential":
+				return "The name in the crendential configuration item"
+			case "azure_openai.credential":
+				return "The name in the crendential configuration item"
+			case "azure_openai.url":
+				return "Your azure openai embedding url, Default is the official embedding url"
+			case "azure_openai.resource_name":
+				return "Your azure openai resource name"
+			case "azure_openai.enable":
+				return "Whether to enable azure openai model service"
+			case "openai.credential":
+				return "The name in the crendential configuration item"
+			case "openai.url":
+				return "Your openai embedding url, Default is the official embedding url"
+			case "openai.enable":
+				return "Whether to enable openai model service"
+			case "dashscope.credential":
+				return "The name in the crendential configuration item"
+			case "dashscope.url":
+				return "Your dashscope embedding url, Default is the official embedding url"
+			case "dashscope.enable":
+				return "Whether to enable dashscope model service"
+			case "cohere.credential":
+				return "The name in the crendential configuration item"
+			case "cohere.url":
+				return "Your cohere embedding url, Default is the official embedding url"
+			case "cohere.enable":
+				return "Whether to enable cohere model service"
+			case "voyageai.credential":
+				return "The name in the crendential configuration item"
+			case "voyageai.url":
+				return "Your voyageai embedding url, Default is the official embedding url"
+			case "voyageai.enable":
+				return "Whether to enable voyageai model service"
+			case "siliconflow.url":
+				return "Your siliconflow embedding url, Default is the official embedding url"
+			case "siliconflow.credential":
+				return "The name in the crendential configuration item"
+			case "siliconflow.enable":
+				return "Whether to enable siliconflow model service"
+			case "bedrock.credential":
+				return "The name in the crendential configuration item"
+			case "bedrock.enable":
+				return "Whether to enable bedrock model service"
+			case "vertexai.url":
+				return "Your VertexAI embedding url"
+			case "vertexai.credential":
+				return "The name in the crendential configuration item"
+			case "vertexai.enable":
+				return "Whether to enable vertexai model service"
+			case "yc.credential":
+				return "The name in the credential configuration item"
+			case "yc.url":
+				return "Your Yandex Cloud text embedding url, Default is the official text embedding url"
+			case "yc.enable":
+				return "Whether to enable Yandex Cloud model service"
+			case "gemini.credential":
+				return "The name in the credential configuration item"
+			case "gemini.url":
+				return "Your Gemini embedding url, Default is the official embedding url"
+			case "gemini.enable":
+				return "Whether to enable Gemini model service"
+			case "huggingface.credential":
+				return "The name in the credential configuration item"
+			case "huggingface.url":
+				return "Your Hugging Face Inference Providers router URL, default is https://router.huggingface.co"
+			case "huggingface.enable":
+				return "Whether to enable Hugging Face text embedding service"
+			default:
+				return ""
+			}
+		},
+	}
+	p.TextEmbeddingProviders.Init(base.mgr)
+
+	p.RerankModelProviders = ParamGroup{
+		KeyPrefix:            "function.rerank.model.providers.",
+		Version:              "2.6.0",
+		Export:               true,
+		Sensitive:            true,
+		NonSensitiveSuffixes: []string{"enable"},
+		DocFunc: func(key string) string {
+			switch key {
+			case "tei.credential":
+				return "The name in the crendential configuration item"
+			case "tei.enable":
+				return "Whether to enable TEI rerank service"
+			case "vllm.credential":
+				return "The name in the crendential configuration item"
+			case "vllm.enable":
+				return "Whether to enable vllm rerank service"
+			case "siliconflow.credential":
+				return "The name in the crendential configuration item"
+			case "siliconflow.url":
+				return "Your siliconflow rerank url, Default is the official rerank url"
+			case "siliconflow.enable":
+				return "Whether to enable siliconflow model service"
+			case "voyageai.credential":
+				return "The name in the crendential configuration item"
+			case "voyageai.url":
+				return "Your voyageai rerank url, Default is the official rerank url"
+			case "voyageai.enable":
+				return "Whether to enable voyageai model service"
+			case "cohere.credential":
+				return "The name in the crendential configuration item"
+			case "cohere.url":
+				return "Your cohere rerank url, Default is the official rerank url"
+			case "cohere.enable":
+				return "Whether to enable cohere model service"
+			case "huggingface.credential":
+				return "The name in the credential configuration item"
+			case "huggingface.url":
+				return "Your Hugging Face Inference Providers router URL, default is https://router.huggingface.co"
+			case "huggingface.enable":
+				return "Whether to enable Hugging Face rerank service"
+			default:
+				return ""
+			}
+		},
+	}
+	p.RerankModelProviders.Init(base.mgr)
+
+	p.LocalResourcePath = ParamItem{
+		Key:          "function.analyzer.local_resource_path",
+		Version:      "2.5.16",
+		Export:       true,
+		DefaultValue: "/var/lib/milvus/analyzer",
+	}
+	p.LocalResourcePath.Init(base.mgr)
+
+	p.LinderaDownloadUrls = ParamGroup{
+		KeyPrefix: "function.analyzer.lindera.download_urls.",
+		Version:   "2.5.16",
+		Sensitive: true,
+	}
+	p.LinderaDownloadUrls.Init(base.mgr)
+
+	p.ZillizProviders = ParamGroup{
+		KeyPrefix: "function.models.zilliz.",
+		Version:   "2.6.5",
+		Sensitive: true,
+		// Every member controls the remote connection or its trust policy, so
+		// projections and logs redact the whole group. Sensitivity does not
+		// restrict configuration writes.
+	}
+	p.ZillizProviders.Init(base.mgr)
+
+	p.AnalyzerConcurrencyPerCPUCore = ParamItem{
+		Key:          "function.analyzer.concurrency_per_cpu_core",
+		Version:      "2.6.8",
+		Export:       true,
+		Doc:          "The concurrency per cpu core for analyzer, pipeline not included",
+		DefaultValue: "8",
+	}
+	p.AnalyzerConcurrencyPerCPUCore.Init(base.mgr)
+
+	p.AnalyzerRunnerConcurrency = ParamItem{
+		Key:          "function.analyzer.runner_concurrency",
+		Version:      "2.6.8",
+		Export:       true,
+		Doc:          "The concurrency for each function runner to tokenize text",
+		DefaultValue: "8",
+	}
+	p.AnalyzerRunnerConcurrency.Init(base.mgr)
+
+	p.EnableWriteBeforeMaterialization = ParamItem{
+		Key:          "function.enableWriteBeforeMaterialization",
+		Version:      "2.6.23",
+		Export:       false,
+		Doc:          "Whether to materialize function output fields (e.g. BM25 sparse vectors) before WAL append. auto: switch on automatically once the whole cluster reaches 2.6.23 and the stability window elapses; false: always keep the legacy format (escape hatch); true: force enable and bypass the version gate (use with caution).",
+		DefaultValue: "auto",
+		VersionGateSwitcher: &VersionGateSwitcher{
+			EnableAutoSwitchValue: "auto",
+			PreSwitchValue:        "false", // before the gate is activated the write path keeps the legacy format
+			GateVersion:           "2.6.23",
+			TargetValue:           "true",
+			SwitchDelay:           1 * time.Minute,
+		},
+	}
+	p.EnableWriteBeforeMaterialization.Init(base.mgr)
+}
+
+func (p *functionConfig) GetTextEmbeddingProviderConfig(providerName string) map[string]string {
+	matchedParam := make(map[string]string)
+
+	params := p.TextEmbeddingProviders.GetValue()
+	prefix := providerName + "."
+
+	for k, v := range params {
+		if strings.HasPrefix(k, prefix) {
+			matchedParam[strings.TrimPrefix(k, prefix)] = v
+		}
+	}
+	return matchedParam
+}
+
+func (p *functionConfig) GetBatchFactor() int {
+	factor := p.BatchFactor.GetAsInt()
+	if factor <= 0 {
+		factor = 1
+	}
+	return factor
+}
+
+func (p *functionConfig) GetAnalyzerRunnerConcurrency() int {
+	concurrency := p.AnalyzerRunnerConcurrency.GetAsInt()
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	return concurrency
+}
+
+func (p *functionConfig) GetRerankModelProviders(providerName string) map[string]string {
+	matchedParam := make(map[string]string)
+
+	params := p.RerankModelProviders.GetValue()
+	prefix := providerName + "."
+
+	for k, v := range params {
+		if strings.HasPrefix(k, prefix) {
+			matchedParam[strings.TrimPrefix(k, prefix)] = v
+		}
+	}
+	return matchedParam
+}

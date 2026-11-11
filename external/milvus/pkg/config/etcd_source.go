@@ -1,0 +1,263 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"context"
+	"path"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"golang.org/x/time/rate"
+
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+)
+
+const (
+	ReadConfigTimeout = 3 * time.Second
+)
+
+type EtcdSource struct {
+	sync.RWMutex
+	etcdCli        *clientv3.Client
+	ctx            context.Context
+	currentConfigs map[string]string
+	keyPrefix      string
+
+	updateMu sync.Mutex
+	// appliedRevision is the etcd revision of the published snapshot. Guarded by updateMu.
+	appliedRevision int64
+	configRefresher *refresher
+	manager         ConfigManager
+}
+
+// newEtcdClient creates the etcd client described by info. The client is owned
+// by the caller: it is passed into NewEtcdSource (which never constructs its
+// own client) and may be shared with other etcd users.
+func newEtcdClient(etcdInfo *EtcdInfo) (*clientv3.Client, error) {
+	return etcd.CreateEtcdClient(
+		etcdInfo.UseEmbed,
+		etcdInfo.EnableAuth,
+		etcdInfo.UserName,
+		etcdInfo.PassWord,
+		etcdInfo.UseSSL,
+		etcdInfo.Endpoints,
+		etcdInfo.CertFile,
+		etcdInfo.KeyFile,
+		etcdInfo.CaCertFile,
+		etcdInfo.MinVersion,
+		etcd.WithDialTimeout(etcdInfo.DialTimeout))
+}
+
+// NewEtcdSource creates an etcd config source over the given client. The
+// client is injected by the caller and never constructed here, so it can be
+// shared with other etcd users (e.g. the version gate confirmator); the source
+// does not own it and Close does not close it. A nil client is rejected: the
+// source would otherwise fail asynchronously in its refresher.
+func NewEtcdSource(etcdCli *clientv3.Client, etcdInfo *EtcdInfo) (*EtcdSource, error) {
+	if etcdCli == nil {
+		return nil, merr.WrapErrServiceInternal("nil etcd client")
+	}
+	// Do not log EtcdInfo directly: it contains the etcd username/password and
+	// certificate paths. Auth and TLS enablement are protected settings too.
+	mlog.Debug(context.TODO(), "init etcd source",
+		mlog.Bool("useEmbed", etcdInfo.UseEmbed),
+		mlog.Int("endpointCount", len(etcdInfo.Endpoints)))
+	es := &EtcdSource{
+		etcdCli:        etcdCli,
+		ctx:            context.Background(),
+		currentConfigs: make(map[string]string),
+		keyPrefix:      etcdInfo.KeyPrefix,
+	}
+	es.configRefresher = newRefresher(etcdInfo.RefreshInterval, es.refreshConfigurations)
+	es.configRefresher.start(es.GetSourceName())
+	return es, nil
+}
+
+// GetConfigurationByKey implements ConfigSource
+func (es *EtcdSource) GetConfigurationByKey(key string) (string, error) {
+	es.RLock()
+	v, ok := es.currentConfigs[key]
+	es.RUnlock()
+	if !ok {
+		return "", errors.Wrap(ErrKeyNotFound, key) // fmt.Errorf("key not found: %s", key)
+	}
+	return v, nil
+}
+
+// GetConfigurations implements ConfigSource
+func (es *EtcdSource) GetConfigurations() (map[string]string, error) {
+	configMap := make(map[string]string)
+	err := es.refreshConfigurations()
+	if err != nil {
+		return nil, err
+	}
+	es.RLock()
+	for key, value := range es.currentConfigs {
+		configMap[key] = value
+	}
+	es.RUnlock()
+
+	return configMap, nil
+}
+
+// GetPriority implements ConfigSource
+func (es *EtcdSource) GetPriority() int {
+	return HighPriority
+}
+
+// GetSourceName implements ConfigSource
+func (es *EtcdSource) GetSourceName() string {
+	return "EtcdSource"
+}
+
+func (es *EtcdSource) Close() {
+	// cannot close client here, since client is shared with components
+	es.configRefresher.stop()
+}
+
+func (es *EtcdSource) SetManager(m ConfigManager) {
+	es.Lock()
+	defer es.Unlock()
+	es.manager = m
+}
+
+func (es *EtcdSource) SetEventHandler(eh EventHandler) {
+	es.configRefresher.SetEventHandler(eh)
+}
+
+func (es *EtcdSource) UpdateOptions(opts Options) {
+	if opts.EtcdInfo == nil {
+		return
+	}
+	es.Lock()
+	defer es.Unlock()
+	es.keyPrefix = opts.EtcdInfo.KeyPrefix
+	if es.configRefresher.refreshInterval != opts.EtcdInfo.RefreshInterval {
+		es.configRefresher.stop()
+		eh := es.configRefresher.GetEventHandler()
+		es.configRefresher = newRefresher(opts.EtcdInfo.RefreshInterval, es.refreshConfigurations)
+		es.configRefresher.SetEventHandler(eh)
+		es.configRefresher.start(es.GetSourceName())
+	}
+}
+
+// refreshConfigurations is the serializable-read variant used by the periodic async
+// refresher. Registered as a func() error callback via newRefresher(...), so the
+// signature must stay no-arg. WithSerializable lets the locally-connected etcd member
+// answer from its own applied state without a ReadIndex round-trip to the leader —
+// acceptable for an async poll where sub-ms staleness is harmless (see #23907).
+func (es *EtcdSource) refreshConfigurations() error {
+	return es.refreshConfigurationsWithOpts(clientv3.WithSerializable())
+}
+
+// RefreshConfigurationsLinearizable is the linearizable-read variant for
+// post-write "read-your-own-write" paths (e.g., AlterConfigsInEtcd). Issues one
+// extra ReadIndex round-trip to the etcd leader per call, guaranteeing that the
+// read reflects every committed entry — including the one the caller just wrote.
+// Without this, the follower the client is connected to can legitimately return
+// the pre-write value because apply is not synchronized with commit.
+func (es *EtcdSource) RefreshConfigurationsLinearizable() error {
+	return es.refreshConfigurationsWithOpts()
+}
+
+func (es *EtcdSource) refreshConfigurationsWithOpts(extraOpts ...clientv3.OpOption) error {
+	es.RLock()
+	prefix := path.Join(es.keyPrefix, "config")
+	es.RUnlock()
+
+	ctx, cancel := context.WithTimeout(es.ctx, ReadConfigTimeout)
+	defer cancel()
+	opts := append([]clientv3.OpOption{clientv3.WithPrefix()}, extraOpts...)
+	response, err := es.etcdCli.Get(ctx, prefix, opts...)
+	if err != nil {
+		return err
+	}
+	newConfig := make(map[string]string, len(response.Kvs))
+	for _, kv := range response.Kvs {
+		key := strings.TrimPrefix(string(kv.Key), prefix+"/")
+		value := string(kv.Value)
+		newConfig[key] = value
+		newConfig[formatKey(key)] = value
+	}
+	// Keep the polling loop cheap and bounded. Values may be credentials and key
+	// names and the etcd prefix may be operator-supplied topology, so an aggregate
+	// count is sufficient here.
+	mlog.RatedDebug(es.ctx, rate.Limit(10), "loaded configurations from etcd",
+		mlog.Int("configCount", len(response.Kvs)))
+	// GetRevision rather than Header.Revision: a hand-written clientv3.KV returns a
+	// zero-value GetResponse whose Header is nil, and the generated getter reports 0 for a
+	// nil receiver. Zero means "no revision information" to update below; etcd revisions
+	// start at 1, so it cannot collide with a real one.
+	return es.update(newConfig, response.Header.GetRevision())
+}
+
+func (es *EtcdSource) update(configs map[string]string, revision int64) error {
+	// make sure config not change when fire event
+	es.updateMu.Lock()
+	defer es.updateMu.Unlock()
+
+	// The etcd read that produced configs runs before updateMu is taken, so refreshes can
+	// finish out of order, and a serializable poll served by a lagging member can return an
+	// older revision than a linearizable refresh that has already published. Publishing it
+	// would roll the configuration back, so drop any snapshot older than the applied one.
+	// A snapshot with no revision (0) cannot be ordered against anything, so it is published
+	// as it was before revisions were tracked rather than silently dropped.
+	if revision > 0 && revision < es.appliedRevision {
+		mlog.RatedInfo(es.ctx, rate.Limit(1), "ignore etcd config snapshot older than the applied one",
+			mlog.Int64("revision", revision),
+			mlog.Int64("appliedRevision", es.appliedRevision))
+		return nil
+	}
+
+	es.RLock()
+	manager := es.manager
+	es.RUnlock()
+	var events []*Event
+	err := publishSourceSnapshot(manager, es.GetSourceName(), configs, func() error {
+		es.Lock()
+		defer es.Unlock()
+		var err error
+		events, err = PopulateEvents(es.GetSourceName(), es.currentConfigs, configs)
+		if err != nil {
+			return err
+		}
+		es.currentConfigs = configs
+		return nil
+	})
+	if err != nil {
+		mlog.Warn(es.ctx, "generating event error", mlog.Err(err))
+		return err
+	}
+	if revision > es.appliedRevision {
+		es.appliedRevision = revision
+	}
+	// Cache eviction and callbacks may read configuration; keep them outside
+	// both the source lock and the manager snapshot publication section.
+	if manager != nil {
+		manager.EvictCacheValueByFormat(lo.Map(events, func(event *Event, _ int) string { return event.Key })...)
+	}
+
+	es.configRefresher.fireEvents(events...)
+	return nil
+}

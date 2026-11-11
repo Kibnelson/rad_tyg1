@@ -1,0 +1,191 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package paramtable
+
+import (
+	"context"
+	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
+)
+
+const (
+	MilvusConfigRefreshIntervalEnvKey = "MILVUS_CONFIG_REFRESH_INTERVAL"
+)
+
+var (
+	once               sync.Once
+	params             ComponentParam
+	fastPBEnabledState atomic.Bool
+	fastPBUpdateMu     sync.Mutex
+	paramsInitialized  atomic.Bool
+	runtimeParam       = runtimeConfig{
+		components: typeutil.ConcurrentSet[string]{},
+	}
+	hookParams   hookConfig
+	cipherParams cipherConfig
+)
+
+func Init() {
+	once.Do(func() {
+		opts := []Option{}
+		if refreshInterval := os.Getenv(MilvusConfigRefreshIntervalEnvKey); refreshInterval != "" {
+			if duration, err := time.ParseDuration(refreshInterval); err == nil {
+				mlog.Info(context.TODO(), "set config refresh interval", mlog.Duration("duration", duration))
+				opts = append(opts, Interval(duration))
+			}
+		}
+		baseTable := NewBaseTable(opts...)
+		params.Init(baseTable)
+		hookBaseTable := NewBaseTableFromYamlOnly(hookYamlFile)
+		hookParams.init(hookBaseTable)
+		cipherParams.init(hookBaseTable)
+		paramsInitialized.Store(true)
+	})
+}
+
+func InitWithBaseTable(baseTable *BaseTable) {
+	once.Do(func() {
+		params.Init(baseTable)
+		hookBaseTable := NewBaseTableFromYamlOnly(hookYamlFile)
+		hookParams.init(hookBaseTable)
+		cipherParams.init(hookBaseTable)
+		paramsInitialized.Store(true)
+	})
+}
+
+func Get() *ComponentParam {
+	Init()
+	return &params
+}
+
+// GetIfInitialized returns the global configuration without initializing it.
+// A nil result lets early RPC decoding retain its default behavior without
+// starting configuration loading as a side effect.
+func GetIfInitialized() *ComponentParam {
+	if !paramsInitialized.Load() {
+		return nil
+	}
+	return &params
+}
+
+// FastPBEnabled returns the lock-free snapshot of common.enableFastPB. Before
+// paramtable finishes initialization, fast protobuf decoding remains enabled.
+func FastPBEnabled() bool {
+	if GetIfInitialized() == nil {
+		return true
+	}
+	return fastPBEnabledState.Load()
+}
+
+func updateFastPBEnabled() {
+	// Serialize the read and publication so concurrent refreshes cannot publish
+	// an older snapshot after a newer one. RPC decoding only reads the atomic.
+	fastPBUpdateMu.Lock()
+	defer fastPBUpdateMu.Unlock()
+	// Exact-key handlers run before typed-cache eviction. Read the uncached
+	// effective value, including runtime overrides and the default after DELETE.
+	fastPBEnabledState.Store(getAsBool(params.CommonCfg.EnableFastPB.GetValue()))
+}
+
+// RefreshRemoteConfigsLinearizable makes the etcd config source re-read every key with a
+// linearizable read, so a value committed to etcd immediately before this call is visible to
+// this process at once instead of only on the next periodic refresh.
+//
+// The boolean reports whether a remote source was there to refresh: with no etcd config
+// source (embedded milvus, unit tests) the file source is already authoritative and carries
+// no propagation delay, so (false, nil) means "nothing to refresh", not a failure. A failed
+// read leaves the last polled snapshot in place, so a caller that cannot tolerate a stale
+// value must still validate what it subsequently reads.
+func (bt *BaseTable) RefreshRemoteConfigsLinearizable() (refreshed bool, err error) {
+	etcdSource, ok := bt.Manager().GetEtcdSource()
+	if !ok {
+		return false, nil
+	}
+	if err := etcdSource.RefreshConfigurationsLinearizable(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func GetBaseTable() *BaseTable {
+	return params.baseTable
+}
+
+func GetHookParams() *hookConfig {
+	return &hookParams
+}
+
+func GetCipherParams() *cipherConfig {
+	return &cipherParams
+}
+
+func SetNodeID(newID UniqueID) {
+	runtimeParam.nodeID.Store(newID)
+}
+
+func GetNodeID() UniqueID {
+	return runtimeParam.nodeID.Load()
+}
+
+func GetStringNodeID() string {
+	return strconv.FormatInt(GetNodeID(), 10)
+}
+
+func SetRole(role string) {
+	runtimeParam.role.Store(role)
+	runtimeParam.isStandalone.Store(role == typeutil.StandaloneRole)
+}
+
+func GetRole() string {
+	return runtimeParam.role.Load()
+}
+
+// IsStandalone returns true if the current node is running in standalone mode.
+// This is a fast path that avoids string comparison on every call.
+func IsStandalone() bool {
+	return runtimeParam.isStandalone.Load()
+}
+
+func SetCreateTime(d time.Time) {
+	runtimeParam.createTime.Store(d)
+}
+
+func GetCreateTime() time.Time {
+	return runtimeParam.createTime.Load()
+}
+
+func SetUpdateTime(d time.Time) {
+	runtimeParam.updateTime.Store(d)
+}
+
+func GetUpdateTime() time.Time {
+	return runtimeParam.updateTime.Load()
+}
+
+func SetLocalComponentEnabled(component string) {
+	runtimeParam.components.Insert(component)
+}
+
+func IsLocalComponentEnabled(component string) bool {
+	return runtimeParam.components.Contain(component)
+}

@@ -1,0 +1,35 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd@sha256:52f17f7e56e4f7239f0320dbfcbcc24721163d7d78ae710b466af3254ccf6366
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes: ["./.services/etcd:/etcd"]
+    ports: ["127.0.0.1:2379:2379"]
+    command: >-
+      etcd -listen-peer-urls=http://127.0.0.1:2380
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379,http://0.0.0.0:4001
+      -initial-advertise-peer-urls=http://127.0.0.1:2380
+      -initial-cluster=default=http://127.0.0.1:2380 -data-dir=/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+  minio:
+    image: milvusdb/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
+    environment:
+      # Public defaults for this loopback-only, disposable local test service.
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes: ["./.services/minio:/minio_data"]
+    ports: ["127.0.0.1:9000:9000"]
+    command: minio server /minio_data --console-address :9001
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 24

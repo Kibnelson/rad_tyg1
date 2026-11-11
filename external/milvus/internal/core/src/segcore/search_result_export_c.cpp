@@ -1,0 +1,1683 @@
+// Copyright (C) 2019-2026 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#include "segcore/search_result_export_c.h"
+
+#include <arrow/api.h>
+#include <arrow/c/bridge.h>
+#include <arrow/c/abi.h>
+#include <folly/CancellationToken.h>
+#include <folly/ScopeGuard.h>
+#include <simdjson.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstdint>
+#include <exception>
+#include <future>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "cachinglayer/Manager.h"
+#include "common/CGoCatch.h"
+#include "common/EasyAssert.h"
+#include "common/FieldMeta.h"
+#include "common/Json.h"
+#include "common/Utils.h"
+#include "log/Log.h"
+#include "common/QueryResult.h"
+#include "common/Types.h"
+#include "futures/Future.h"
+#include "monitor/Monitor.h"
+#include "monitor/scope_metric.h"
+#include "prometheus/histogram.h"
+#include "pb/cgo_msg.pb.h"
+#include "query/PlanImpl.h"
+#include "segcore/SegmentInterface.h"
+#include "segcore/SegmentReadLease.h"
+#include "segcore/Utils.h"
+#include "segcore/arrow_field_utils.h"
+#include "segcore/reduce/Reduce.h"
+#include "storage/ThreadPools.h"
+
+using SearchResult = milvus::SearchResult;
+using milvus::segcore::ArrowExportFailure;
+using milvus::segcore::EmptyExtraFieldArrowType;
+using milvus::segcore::FieldDataToArrow;
+using milvus::segcore::kMilvusDataTypeMetadataKey;
+using milvus::segcore::MilvusField;
+
+namespace {
+
+// GroupByArrowInfo describes one $group_by_<fieldID> Arrow column to emit.
+// Element type is derived from the plan's search_info_, falling back to
+// json_type_ when the group-by field is a JSON column. field_data_type is the
+// Milvus type serialized as Arrow field metadata.
+struct GroupByArrowInfo {
+    milvus::FieldId field_id{0};
+    milvus::DataType milvus_type{milvus::DataType::NONE};
+    milvus::DataType field_data_type{milvus::DataType::NONE};
+    std::shared_ptr<arrow::DataType> arrow_type;
+};
+
+struct FunctionChainInputProjection {
+    milvus::FieldId source_field_id{0};
+    milvus::DataType target_data_type{milvus::DataType::NONE};
+    std::string logical_name;
+    std::vector<std::string> nested_path_tokens;
+    bool is_json_path{false};
+};
+
+struct CFreeDeleter {
+    void
+    operator()(void* ptr) const {
+        free(ptr);
+    }
+};
+
+using CBufferPtr = std::unique_ptr<void, CFreeDeleter>;
+using ChunkSizesPtr = std::unique_ptr<int64_t, CFreeDeleter>;
+
+void
+ReleaseArrowSchemaIfNeeded(ArrowSchema* schema) {
+    if (schema != nullptr && schema->release != nullptr) {
+        schema->release(schema);
+    }
+}
+
+void
+ReleaseArrowArrayIfNeeded(ArrowArray* array) {
+    if (array != nullptr && array->release != nullptr) {
+        array->release(array);
+    }
+}
+
+void
+AssertEmptyCProto(const CProto* proto) {
+    AssertInfo(proto != nullptr, "null CProto output");
+    AssertInfo(proto->proto_blob == nullptr && proto->proto_size == 0,
+               "CProto output must be empty before FillOutputFieldsOrdered");
+}
+
+void
+AssertSearchResultReadLease(const SearchResult* result) {
+    AssertInfo(result != nullptr, "null search result");
+    if (result->segment_ == nullptr) {
+        return;
+    }
+
+    auto segment =
+        static_cast<const milvus::segcore::SegmentInterface*>(result->segment_);
+    if (segment->type() == SegmentType::Sealed) {
+        AssertInfo(
+            result->read_lease_ != nullptr && result->read_lease_->valid(),
+            "sealed search result for segment {} has no read lease",
+            segment->get_segment_id());
+    }
+}
+
+void
+SetFieldDataElementTypeIfNeeded(milvus::proto::schema::FieldData* field_data,
+                                const milvus::FieldMeta& field_meta) {
+    if (field_meta.get_data_type() == milvus::DataType::ARRAY) {
+        field_data->mutable_scalars()->mutable_array_data()->set_element_type(
+            milvus::proto::schema::DataType(field_meta.get_element_type()));
+    } else if (field_meta.get_data_type() == milvus::DataType::VECTOR_ARRAY) {
+        field_data->mutable_vectors()->mutable_vector_array()->set_element_type(
+            milvus::proto::schema::DataType(field_meta.get_element_type()));
+    }
+}
+
+CStatus
+SerializeSearchResultDataToCProto(
+    milvus::proto::schema::SearchResultData& result_data,
+    CProto* out_result,
+    const char* allocation_error,
+    const char* serialization_error) {
+    for (auto& field_data : *result_data.mutable_fields_data()) {
+        milvus::SyncFieldDataRowValidData(&field_data);
+    }
+    for (auto& field_data : *result_data.mutable_group_by_field_values()) {
+        milvus::SyncFieldDataRowValidData(&field_data);
+    }
+    if (result_data.has_group_by_field_value()) {
+        milvus::SyncFieldDataRowValidData(
+            result_data.mutable_group_by_field_value());
+    }
+    auto size = result_data.ByteSizeLong();
+    CBufferPtr buffer(malloc(size));
+    if (buffer == nullptr) {
+        return milvus::FailureCStatus(milvus::ErrorCode::UnexpectedError,
+                                      allocation_error);
+    }
+    if (!result_data.SerializeToArray(buffer.get(), size)) {
+        return milvus::FailureCStatus(milvus::ErrorCode::UnexpectedError,
+                                      serialization_error);
+    }
+
+    out_result->proto_blob = buffer.release();
+    out_result->proto_size = size;
+    return milvus::SuccessCStatus();
+}
+
+std::string
+GroupByColumnName(milvus::FieldId field_id) {
+    return "$group_by_" + std::to_string(field_id.get());
+}
+
+std::vector<GroupByArrowInfo>
+ResolveGroupByArrowInfos(milvus::query::Plan* plan) {
+    std::vector<GroupByArrowInfo> infos;
+    auto& search_info = plan->plan_node_->search_info_;
+    if (!search_info.has_group_by()) {
+        return infos;
+    }
+    AssertInfo(!search_info.group_by_field_ids_.empty(),
+               "Go reduce Arrow export has group_by enabled but no group_by "
+               "fields");
+
+    infos.reserve(search_info.group_by_field_ids_.size());
+    int json_group_by_field_count = 0;
+    for (auto field_id : search_info.group_by_field_ids_) {
+        GroupByArrowInfo info;
+        info.field_id = field_id;
+        auto& field_meta = plan->schema_->operator[](info.field_id);
+        auto dt = field_meta.get_data_type();
+        info.field_data_type = dt;
+
+        if (dt == milvus::DataType::JSON) {
+            ++json_group_by_field_count;
+            AssertInfo(
+                json_group_by_field_count <= 1,
+                "Go reduce Arrow export supports at most one JSON group_by "
+                "field with the current single json_path/json_type plan, got "
+                "{} JSON fields",
+                json_group_by_field_count);
+            dt = search_info.json_type_.value_or(milvus::DataType::VARCHAR);
+            info.field_data_type = dt;
+        } else if (dt == milvus::DataType::GEOMETRY) {
+            // GEOMETRY stores std::string in the GroupByValueType variant.
+            // Map to VARCHAR so the Arrow column is utf8, while metadata
+            // preserves the logical type when the proto needs it later.
+            dt = milvus::DataType::VARCHAR;
+        }
+
+        info.milvus_type = dt;
+        info.arrow_type = milvus::GetArrowDataType(info.milvus_type);
+        infos.push_back(info);
+    }
+    return infos;
+}
+
+// Build an empty RecordBatch (0 rows) for empty search results.
+// The plan provides PK type, group-by metadata, and extra-field metadata.
+arrow::Result<std::shared_ptr<arrow::RecordBatch>>
+BuildEmptyBatch(milvus::query::Plan* plan,
+                const int64_t* extra_field_ids,
+                int64_t num_extra_fields,
+                bool element_level = false) {
+    auto& schema = plan->schema_;
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+
+    // Determine PK type from schema
+    auto pk_field_id = schema->get_primary_field_id();
+    auto pk_type = arrow::int64();
+    if (pk_field_id.has_value()) {
+        auto& pk_meta = schema->operator[](pk_field_id.value());
+        if (pk_meta.get_data_type() == milvus::DataType::VARCHAR) {
+            pk_type = arrow::utf8();
+        }
+    }
+
+    // $id
+    ARROW_ASSIGN_OR_RAISE(auto id_arr, arrow::MakeEmptyArray(pk_type));
+    fields.push_back(arrow::field("$id", pk_type));
+    arrays.push_back(id_arr);
+
+    // $score
+    ARROW_ASSIGN_OR_RAISE(auto score_arr,
+                          arrow::MakeEmptyArray(arrow::float32()));
+    fields.push_back(arrow::field("$score", arrow::float32()));
+    arrays.push_back(score_arr);
+
+    // $seg_offset
+    ARROW_ASSIGN_OR_RAISE(auto offset_arr,
+                          arrow::MakeEmptyArray(arrow::int64()));
+    fields.push_back(arrow::field("$seg_offset", arrow::int64()));
+    arrays.push_back(offset_arr);
+
+    // $group_by_<fieldID> (when group-by is enabled in the plan), kept
+    // consistent with non-empty batches so the Arrow stream schema is uniform
+    // per segment.
+    for (const auto& group_by_info : ResolveGroupByArrowInfos(plan)) {
+        ARROW_ASSIGN_OR_RAISE(auto gb_arr,
+                              arrow::MakeEmptyArray(group_by_info.arrow_type));
+        fields.push_back(MilvusField(GroupByColumnName(group_by_info.field_id),
+                                     group_by_info.arrow_type,
+                                     true,
+                                     group_by_info.field_id,
+                                     group_by_info.field_data_type));
+        arrays.push_back(gb_arr);
+    }
+
+    // $element_indices (when element-level search is active)
+    if (element_level) {
+        ARROW_ASSIGN_OR_RAISE(auto ei_arr,
+                              arrow::MakeEmptyArray(arrow::int32()));
+        fields.push_back(arrow::field("$element_indices", arrow::int32()));
+        arrays.push_back(ei_arr);
+    }
+
+    // Extra fields (e.g., for L0 rerank)
+    for (int64_t i = 0; i < num_extra_fields; i++) {
+        auto field_id = milvus::FieldId(extra_field_ids[i]);
+        auto& field_meta = schema->operator[](field_id);
+        auto name = std::string(field_meta.get_name().get());
+        // Keep empty extra-field batches aligned with FieldDataToArrow's
+        // physical Arrow types. Full GEOMETRY extra-field export will be
+        // implemented together with L0 rerank support.
+        ARROW_ASSIGN_OR_RAISE(auto arrow_type,
+                              EmptyExtraFieldArrowType(field_meta, true));
+        ARROW_ASSIGN_OR_RAISE(auto arr, arrow::MakeEmptyArray(arrow_type));
+        fields.push_back(MilvusField(name,
+                                     arrow_type,
+                                     field_meta.is_nullable(),
+                                     field_id,
+                                     field_meta.get_data_type()));
+        arrays.push_back(arr);
+    }
+
+    return arrow::RecordBatch::Make(arrow::schema(fields), 0, arrays);
+}
+
+// Build the $group_by Arrow array from SearchResult::composite_group_by_values_,
+// dispatching on the resolved element type. Each entry in `values` is an
+// std::optional<std::variant<monostate, ints..., bool, string>>; entries that
+// are nullopt or hold std::monostate become Arrow null values.
+template <typename T, typename BuilderType>
+arrow::Result<std::shared_ptr<arrow::Array>>
+BuildGroupByTypedArray(const std::vector<milvus::GroupByValueType>& values) {
+    BuilderType builder;
+    ARROW_RETURN_NOT_OK(builder.Reserve(values.size()));
+    for (auto& v : values) {
+        if (!v.has_value() ||
+            std::holds_alternative<std::monostate>(v.value())) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+            continue;
+        }
+        if constexpr (std::is_same_v<T, std::string>) {
+            ARROW_RETURN_NOT_OK(builder.Append(std::get<T>(v.value())));
+        } else {
+            builder.UnsafeAppend(std::get<T>(v.value()));
+        }
+    }
+    std::shared_ptr<arrow::Array> arr;
+    ARROW_RETURN_NOT_OK(builder.Finish(&arr));
+    return arr;
+}
+
+arrow::Result<std::shared_ptr<arrow::Array>>
+BuildGroupByArray(const std::vector<milvus::GroupByValueType>& values,
+                  milvus::DataType element_type) {
+    switch (element_type) {
+        case milvus::DataType::INT8:
+            return BuildGroupByTypedArray<int8_t, arrow::Int8Builder>(values);
+        case milvus::DataType::INT16:
+            return BuildGroupByTypedArray<int16_t, arrow::Int16Builder>(values);
+        case milvus::DataType::INT32:
+            return BuildGroupByTypedArray<int32_t, arrow::Int32Builder>(values);
+        case milvus::DataType::INT64:
+        case milvus::DataType::TIMESTAMPTZ:
+            return BuildGroupByTypedArray<int64_t, arrow::Int64Builder>(values);
+        case milvus::DataType::BOOL:
+            return BuildGroupByTypedArray<bool, arrow::BooleanBuilder>(values);
+        case milvus::DataType::VARCHAR:
+        case milvus::DataType::STRING:
+            return BuildGroupByTypedArray<std::string, arrow::StringBuilder>(
+                values);
+        default:
+            return arrow::Status::NotImplemented(
+                "unsupported group-by element type in Arrow export");
+    }
+}
+
+// Build Arrow RecordBatch from a SearchResult that has been filtered and had PKs filled.
+// extra_fields contains additional field data to include (e.g., for L0 rerank).
+// The plan provides schema and group-by metadata.
+arrow::Result<std::shared_ptr<arrow::RecordBatch>>
+BuildSearchResultBatch(
+    SearchResult* search_result,
+    milvus::query::Plan* plan,
+    const int64_t* extra_field_ids,
+    int64_t num_extra_fields,
+    const std::map<milvus::FieldId, std::unique_ptr<milvus::DataArray>>&
+        extra_fields) {
+    auto& schema = plan->schema_;
+    auto total_valid = search_result->seg_offsets_.size();
+
+    // Collect fields and arrays
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+
+    // Build $id column based on PK type
+    {
+        if (search_result->pk_type_ == milvus::DataType::INT64) {
+            arrow::Int64Builder id_builder;
+            ARROW_RETURN_NOT_OK(id_builder.Reserve(total_valid));
+            for (size_t i = 0; i < total_valid; ++i) {
+                auto& pk = search_result->primary_keys_[i];
+                id_builder.UnsafeAppend(std::get<int64_t>(pk));
+            }
+            std::shared_ptr<arrow::Array> id_array;
+            ARROW_RETURN_NOT_OK(id_builder.Finish(&id_array));
+            fields.push_back(arrow::field("$id", arrow::int64()));
+            arrays.push_back(id_array);
+        } else {
+            arrow::StringBuilder id_builder;
+            for (size_t i = 0; i < total_valid; ++i) {
+                auto& pk = search_result->primary_keys_[i];
+                ARROW_RETURN_NOT_OK(
+                    id_builder.Append(std::get<std::string>(pk)));
+            }
+            std::shared_ptr<arrow::Array> id_array;
+            ARROW_RETURN_NOT_OK(id_builder.Finish(&id_array));
+            fields.push_back(arrow::field("$id", arrow::utf8()));
+            arrays.push_back(id_array);
+        }
+    }
+
+    // Build $score column (float32)
+    {
+        arrow::FloatBuilder score_builder;
+        ARROW_RETURN_NOT_OK(score_builder.Reserve(total_valid));
+        for (size_t i = 0; i < total_valid; ++i) {
+            score_builder.UnsafeAppend(search_result->distances_[i]);
+        }
+        std::shared_ptr<arrow::Array> score_array;
+        ARROW_RETURN_NOT_OK(score_builder.Finish(&score_array));
+        fields.push_back(arrow::field("$score", arrow::float32()));
+        arrays.push_back(score_array);
+    }
+
+    // Build $seg_offset column (int64)
+    {
+        arrow::Int64Builder seg_offset_builder;
+        ARROW_RETURN_NOT_OK(seg_offset_builder.Reserve(total_valid));
+        for (size_t i = 0; i < total_valid; ++i) {
+            seg_offset_builder.UnsafeAppend(search_result->seg_offsets_[i]);
+        }
+        std::shared_ptr<arrow::Array> seg_offset_array;
+        ARROW_RETURN_NOT_OK(seg_offset_builder.Finish(&seg_offset_array));
+        fields.push_back(arrow::field("$seg_offset", arrow::int64()));
+        arrays.push_back(seg_offset_array);
+    }
+
+    // Build $group_by_<fieldID> columns when group-by is enabled. Type is
+    // resolved from the plan (with json_type_ fallback for JSON path group-by)
+    // so the column schema stays consistent across empty and non-empty batches.
+    auto group_by_infos = ResolveGroupByArrowInfos(plan);
+    if (!group_by_infos.empty()) {
+        AssertInfo(search_result->composite_group_by_values_.has_value(),
+                   "plan has group_by_field_ids but SearchResult is missing "
+                   "composite_group_by_values_");
+        auto& composite = search_result->composite_group_by_values_.value();
+        AssertInfo(
+            composite.size() == total_valid,
+            "composite_group_by_values_ size {} does not match seg_offsets_ "
+            "size {}",
+            composite.size(),
+            total_valid);
+        for (const auto& key : composite) {
+            AssertInfo(key.Size() == group_by_infos.size(),
+                       "group_by value count {} does not match group_by field "
+                       "count {}",
+                       key.Size(),
+                       group_by_infos.size());
+        }
+
+        for (size_t field_idx = 0; field_idx < group_by_infos.size();
+             ++field_idx) {
+            const auto& group_by_info = group_by_infos[field_idx];
+            std::vector<milvus::GroupByValueType> field_values;
+            field_values.reserve(composite.size());
+            for (const auto& key : composite) {
+                field_values.push_back(key[field_idx]);
+            }
+            ARROW_ASSIGN_OR_RAISE(
+                auto gb_arr,
+                BuildGroupByArray(field_values, group_by_info.milvus_type));
+            fields.push_back(
+                MilvusField(GroupByColumnName(group_by_info.field_id),
+                            group_by_info.arrow_type,
+                            true,
+                            group_by_info.field_id,
+                            group_by_info.field_data_type));
+            arrays.push_back(gb_arr);
+        }
+    }
+
+    // Build $element_indices column when element-level search is active.
+    // element_indices_ is int32 and aligned with seg_offsets_ after compaction.
+    if (search_result->element_level_) {
+        AssertInfo(
+            search_result->element_indices_.size() == total_valid,
+            "element_indices_ size {} does not match seg_offsets_ size {}",
+            search_result->element_indices_.size(),
+            total_valid);
+        arrow::Int32Builder ei_builder;
+        ARROW_RETURN_NOT_OK(ei_builder.Reserve(total_valid));
+        for (size_t i = 0; i < total_valid; ++i) {
+            ei_builder.UnsafeAppend(search_result->element_indices_[i]);
+        }
+        std::shared_ptr<arrow::Array> ei_array;
+        ARROW_RETURN_NOT_OK(ei_builder.Finish(&ei_array));
+        fields.push_back(arrow::field("$element_indices", arrow::int32()));
+        arrays.push_back(ei_array);
+    }
+
+    // Build extra field columns (e.g., for L0 rerank). Keep this in the
+    // caller-requested order so empty and non-empty batches expose the same
+    // schema layout.
+    if (num_extra_fields > 0) {
+        for (int64_t i = 0; i < num_extra_fields; i++) {
+            auto field_id = milvus::FieldId(extra_field_ids[i]);
+            auto it = extra_fields.find(field_id);
+            if (it == extra_fields.end()) {
+                return arrow::Status::Invalid(
+                    "missing extra field data for requested field id ",
+                    field_id.get());
+            }
+            auto& field_data = it->second;
+            auto& field_meta = schema->operator[](field_id);
+            auto name = std::string(field_meta.get_name().get());
+            auto result =
+                FieldDataToArrow(name, *field_data, total_valid, true);
+            if (!result.ok()) {
+                return result.status();
+            }
+            auto [field, arr] = *result;
+            fields.push_back(MilvusField(field->name(),
+                                         field->type(),
+                                         field_meta.is_nullable(),
+                                         field_id,
+                                         field_meta.get_data_type()));
+            arrays.push_back(arr);
+        }
+    }
+
+    {
+        return arrow::RecordBatch::Make(
+            arrow::schema(fields), total_valid, arrays);
+    }
+}
+
+CStatus
+PopulateChunkSizes(SearchResult* search_result,
+                   int64_t** out_chunk_sizes,
+                   int64_t* out_num_chunks) {
+    AssertInfo(out_chunk_sizes != nullptr, "null chunk sizes output");
+    AssertInfo(out_num_chunks != nullptr, "null chunk size count output");
+
+    auto nq = search_result->total_nq_;
+    auto num_chunks = std::max(nq, int64_t(1));
+    ChunkSizesPtr chunk_sizes(
+        static_cast<int64_t*>(malloc(sizeof(int64_t) * num_chunks)));
+    if (chunk_sizes == nullptr) {
+        return milvus::FailureCStatus(milvus::ErrorCode::UnexpectedError,
+                                      "failed to allocate Arrow chunk sizes");
+    }
+
+    if (nq == 0) {
+        chunk_sizes.get()[0] = 0;
+    } else if (search_result->topk_per_nq_prefix_sum_.size() ==
+               static_cast<size_t>(nq + 1)) {
+        const auto& prefix = search_result->topk_per_nq_prefix_sum_;
+        for (int64_t i = 0; i < nq; i++) {
+            chunk_sizes.get()[i] = prefix[i + 1] - prefix[i];
+        }
+    } else if (search_result->topk_per_nq_prefix_sum_.empty() &&
+               (search_result->unity_topK_ == 0 ||
+                search_result->seg_offsets_.empty())) {
+        // Some no-hit paths only set total_nq_/unity_topK_ and leave the
+        // per-NQ prefix vector empty. Legacy stream export returned one empty
+        // batch per NQ for those results; keep the RecordBatch export contract
+        // equivalent by reporting zero rows for every NQ.
+        for (int64_t i = 0; i < nq; i++) {
+            chunk_sizes.get()[i] = 0;
+        }
+    } else {
+        return milvus::FailureCStatus(
+            milvus::ErrorCode::UnexpectedError,
+            "topk_per_nq_prefix_sum size does not match total_nq");
+    }
+
+    *out_chunk_sizes = chunk_sizes.release();
+    *out_num_chunks = num_chunks;
+    return milvus::SuccessCStatus();
+}
+
+CStatus
+BuildSearchResultFullBatch(CSearchResult c_search_result,
+                           CSearchPlan c_plan,
+                           const int64_t* extra_field_ids,
+                           int64_t num_extra_fields,
+                           std::shared_ptr<arrow::RecordBatch>* out_batch,
+                           int64_t** out_chunk_sizes,
+                           int64_t* out_num_chunks,
+                           const folly::CancellationToken& cancel_token) {
+    milvus::futures::throwIfCancelled(cancel_token);
+    auto search_result = static_cast<SearchResult*>(c_search_result);
+    auto plan = static_cast<milvus::query::Plan*>(c_plan);
+    AssertInfo(search_result != nullptr, "null search result");
+    AssertInfo(plan != nullptr, "null search plan");
+    AssertInfo(out_batch != nullptr, "null Arrow RecordBatch output");
+    AssertInfo(out_chunk_sizes != nullptr, "null chunk sizes output");
+    AssertInfo(out_num_chunks != nullptr, "null chunk size count output");
+    *out_chunk_sizes = nullptr;
+    *out_num_chunks = 0;
+
+    auto export_chunk_sizes = [&]() -> CStatus {
+        return PopulateChunkSizes(
+            search_result, out_chunk_sizes, out_num_chunks);
+    };
+
+    if (search_result->unity_topK_ == 0 ||
+        search_result->seg_offsets_.empty()) {
+        auto empty_batch_result =
+            BuildEmptyBatch(plan,
+                            extra_field_ids,
+                            num_extra_fields,
+                            search_result->element_level_);
+        if (!empty_batch_result.ok()) {
+            return ArrowExportFailure(empty_batch_result.status());
+        }
+        *out_batch = *empty_batch_result;
+        return export_chunk_sizes();
+    }
+
+    AssertInfo(search_result->topk_per_nq_prefix_sum_.size() ==
+                   static_cast<size_t>(search_result->total_nq_ + 1),
+               "topk_per_nq_prefix_sum_ size {} does not match total_nq {}",
+               search_result->topk_per_nq_prefix_sum_.size(),
+               search_result->total_nq_);
+
+    if (search_result->get_total_result_count() == 0) {
+        auto empty_batch_result =
+            BuildEmptyBatch(plan,
+                            extra_field_ids,
+                            num_extra_fields,
+                            search_result->element_level_);
+        if (!empty_batch_result.ok()) {
+            return ArrowExportFailure(empty_batch_result.status());
+        }
+        *out_batch = *empty_batch_result;
+        return export_chunk_sizes();
+    }
+
+    auto segment = static_cast<milvus::segcore::SegmentInternalInterface*>(
+        search_result->segment_);
+
+    milvus::futures::throwIfCancelled(cancel_token);
+    { milvus::segcore::SortEqualScoresByPks(search_result); }
+
+    std::map<milvus::FieldId, std::unique_ptr<milvus::DataArray>> extra_fields;
+    if (num_extra_fields > 0 && extra_field_ids != nullptr &&
+        search_result->get_total_result_count() > 0) {
+        auto size = search_result->seg_offsets_.size();
+        milvus::OpContext op_ctx(cancel_token);
+        for (int64_t i = 0; i < num_extra_fields; i++) {
+            milvus::futures::throwIfCancelled(cancel_token);
+            auto field_id = milvus::FieldId(extra_field_ids[i]);
+            auto& field_meta = plan->schema_->operator[](field_id);
+            extra_fields[field_id] = milvus::segcore::BulkSubscriptWithSnapshot(
+                segment,
+                search_result->read_snapshot_,
+                &op_ctx,
+                field_id,
+                field_meta,
+                search_result->seg_offsets_.data(),
+                size);
+        }
+        search_result->search_storage_cost_.scanned_remote_bytes +=
+            op_ctx.storage_usage.scanned_cold_bytes.load();
+        search_result->search_storage_cost_.scanned_total_bytes +=
+            op_ctx.storage_usage.scanned_total_bytes.load();
+    }
+
+    milvus::futures::throwIfCancelled(cancel_token);
+    auto batch_result = BuildSearchResultBatch(
+        search_result, plan, extra_field_ids, num_extra_fields, extra_fields);
+    if (!batch_result.ok()) {
+        return ArrowExportFailure(batch_result.status());
+    }
+    *out_batch = *batch_result;
+    return export_chunk_sizes();
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>>
+BuildExplicitFieldsBatch(
+    milvus::query::Plan* plan,
+    const int64_t* field_ids,
+    int64_t num_fields,
+    const std::map<milvus::FieldId, std::unique_ptr<milvus::DataArray>>&
+        field_data,
+    int64_t total_rows) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    fields.reserve(num_fields);
+    arrays.reserve(num_fields);
+
+    for (int64_t i = 0; i < num_fields; ++i) {
+        auto field_id = milvus::FieldId(field_ids[i]);
+        auto& field_meta = plan->schema_->operator[](field_id);
+        auto name = std::string(field_meta.get_name().get());
+
+        std::shared_ptr<arrow::Array> array;
+        if (total_rows == 0) {
+            ARROW_ASSIGN_OR_RAISE(auto arrow_type,
+                                  EmptyExtraFieldArrowType(field_meta, true));
+            ARROW_ASSIGN_OR_RAISE(array, arrow::MakeEmptyArray(arrow_type));
+        } else {
+            auto it = field_data.find(field_id);
+            if (it == field_data.end()) {
+                return arrow::Status::Invalid(
+                    "missing ordered field data for field id ", field_id.get());
+            }
+            ARROW_ASSIGN_OR_RAISE(
+                auto converted,
+                FieldDataToArrow(name, *it->second, total_rows, true));
+            array = converted.second;
+        }
+
+        fields.push_back(MilvusField(name,
+                                     array->type(),
+                                     field_meta.is_nullable(),
+                                     field_id,
+                                     field_meta.get_data_type()));
+        arrays.push_back(std::move(array));
+    }
+
+    return arrow::RecordBatch::Make(
+        arrow::schema(std::move(fields)), total_rows, std::move(arrays));
+}
+
+std::vector<FunctionChainInputProjection>
+ParseFunctionChainInputPlan(milvus::query::Plan* plan,
+                            const void* input_plan_blob,
+                            int64_t input_plan_size) {
+    AssertInfo(input_plan_blob != nullptr && input_plan_size > 0 &&
+                   input_plan_size <= std::numeric_limits<int>::max(),
+               "invalid function chain input plan buffer");
+    milvus::proto::cgo::FunctionChainInputPlan input_plan;
+    AssertInfo(input_plan.ParseFromArray(input_plan_blob,
+                                         static_cast<int>(input_plan_size)),
+               "failed to parse function chain input plan");
+    AssertInfo(input_plan.inputs_size() > 0,
+               "function chain input plan has no inputs");
+
+    std::vector<FunctionChainInputProjection> result;
+    result.reserve(input_plan.inputs_size());
+    for (const auto& input : input_plan.inputs()) {
+        AssertInfo(!input.logical_name().empty(),
+                   "function chain projection has empty logical name");
+        FunctionChainInputProjection projection;
+        projection.source_field_id = milvus::FieldId(input.source_field_id());
+        projection.target_data_type =
+            static_cast<milvus::DataType>(input.target_data_type());
+        projection.logical_name = input.logical_name();
+        projection.is_json_path = input.is_json_path();
+        projection.nested_path_tokens.assign(input.nested_path().begin(),
+                                             input.nested_path().end());
+        if (projection.is_json_path) {
+            AssertInfo(!projection.nested_path_tokens.empty(),
+                       "function chain JSON projection {} has empty path",
+                       projection.logical_name);
+        } else {
+            AssertInfo(projection.nested_path_tokens.empty(),
+                       "scalar function chain projection {} has a JSON path",
+                       projection.logical_name);
+        }
+
+        const auto& field_meta =
+            plan->schema_->operator[](projection.source_field_id);
+        if (projection.is_json_path) {
+            AssertInfo(field_meta.get_data_type() == milvus::DataType::JSON,
+                       "function chain JSON projection {} source field {} is "
+                       "not JSON",
+                       projection.logical_name,
+                       projection.source_field_id.get());
+            switch (projection.target_data_type) {
+                case milvus::DataType::BOOL:
+                case milvus::DataType::INT64:
+                case milvus::DataType::DOUBLE:
+                case milvus::DataType::VARCHAR:
+                    break;
+                default:
+                    ThrowInfo(milvus::ErrorCode::UnexpectedError,
+                              "function chain JSON projection {} has "
+                              "unsupported target type {}",
+                              projection.logical_name,
+                              projection.target_data_type);
+            }
+        } else {
+            AssertInfo(field_meta.get_data_type() != milvus::DataType::JSON,
+                       "complete JSON root {} cannot be projected",
+                       projection.logical_name);
+            AssertInfo(
+                projection.target_data_type == field_meta.get_data_type(),
+                "scalar function chain projection {} target type does not "
+                "match source field type",
+                projection.logical_name);
+            AssertInfo(projection.logical_name == field_meta.get_name().get(),
+                       "scalar function chain projection {} does not match "
+                       "source field name {}",
+                       projection.logical_name,
+                       field_meta.get_name().get());
+        }
+        result.push_back(std::move(projection));
+    }
+    return result;
+}
+
+std::vector<milvus::FieldId>
+UniqueProjectionSourceFieldIDs(
+    const std::vector<FunctionChainInputProjection>& projections) {
+    std::vector<milvus::FieldId> field_ids;
+    std::set<milvus::FieldId> seen;
+    for (const auto& projection : projections) {
+        if (seen.insert(projection.source_field_id).second) {
+            field_ids.push_back(projection.source_field_id);
+        }
+    }
+    return field_ids;
+}
+
+std::shared_ptr<arrow::Field>
+FunctionChainProjectionField(const FunctionChainInputProjection& projection) {
+    auto metadata = arrow::key_value_metadata(
+        {kMilvusDataTypeMetadataKey},
+        {std::to_string(static_cast<int32_t>(projection.target_data_type))});
+    return arrow::field(projection.logical_name,
+                        milvus::GetArrowDataType(projection.target_data_type),
+                        true,
+                        std::move(metadata));
+}
+
+[[noreturn]] void
+ThrowFunctionChainJSONError(simdjson::error_code error) {
+    auto code = milvus::SimdjsonParseErrorToErrorCode(error);
+    auto action = code == milvus::ErrorCode::DataFormatBroken
+                      ? "parse persisted"
+                      : "process persisted";
+    ThrowInfo(code,
+              "failed to {} function chain JSON data: {}",
+              action,
+              simdjson::error_message(error));
+}
+
+template <typename T, typename Builder>
+arrow::Status
+AppendFunctionChainJSONResult(simdjson::simdjson_result<T> result,
+                              arrow::ArrayBuilder* builder) {
+    switch (result.error()) {
+        case simdjson::SUCCESS:
+            return static_cast<Builder*>(builder)->Append(result.value());
+        case simdjson::NO_SUCH_FIELD:
+        case simdjson::INDEX_OUT_OF_BOUNDS:
+        case simdjson::INVALID_JSON_POINTER:
+        case simdjson::INCORRECT_TYPE:
+        case simdjson::SCALAR_DOCUMENT_AS_VALUE:
+        case simdjson::NUMBER_ERROR:
+        case simdjson::NUMBER_OUT_OF_RANGE:
+        case simdjson::BIGINT_ERROR:
+            return builder->AppendNull();
+        default:
+            ThrowFunctionChainJSONError(result.error());
+    }
+}
+
+arrow::Status
+AppendFunctionChainJSONValue(const milvus::Json& json,
+                             const FunctionChainInputProjection& projection,
+                             const std::string& pointer,
+                             arrow::ArrayBuilder* builder) {
+    if (json.size() == 0) {
+        ThrowFunctionChainJSONError(simdjson::EMPTY);
+    }
+    switch (projection.target_data_type) {
+        case milvus::DataType::BOOL:
+            return AppendFunctionChainJSONResult<bool, arrow::BooleanBuilder>(
+                json.at<bool>(pointer), builder);
+        case milvus::DataType::INT64:
+            return AppendFunctionChainJSONResult<int64_t, arrow::Int64Builder>(
+                json.at<int64_t>(pointer), builder);
+        case milvus::DataType::DOUBLE:
+            return AppendFunctionChainJSONResult<double, arrow::DoubleBuilder>(
+                json.at<double>(pointer), builder);
+        case milvus::DataType::VARCHAR:
+            return AppendFunctionChainJSONResult<std::string_view,
+                                                 arrow::StringBuilder>(
+                json.at<std::string_view>(pointer), builder);
+        default:
+            ThrowInfo(milvus::ErrorCode::UnexpectedError,
+                      "unsupported function chain JSON projection type {}",
+                      projection.target_data_type);
+    }
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>>
+ProjectFunctionChainInputBatch(
+    const std::shared_ptr<arrow::RecordBatch>& root_batch,
+    const std::vector<milvus::FieldId>& root_field_ids,
+    const std::vector<FunctionChainInputProjection>& projections,
+    int prefix_column_count,
+    const folly::CancellationToken& cancel_token) {
+    milvus::futures::throwIfCancelled(cancel_token);
+    AssertInfo(root_batch != nullptr, "null root Arrow RecordBatch");
+    AssertInfo(prefix_column_count >= 0 &&
+                   prefix_column_count <= root_batch->num_columns(),
+               "invalid root Arrow RecordBatch prefix column count {}",
+               prefix_column_count);
+    AssertInfo(
+        root_batch->num_columns() ==
+            prefix_column_count + static_cast<int>(root_field_ids.size()),
+        "root Arrow RecordBatch column count does not match input "
+        "field count");
+
+    std::map<milvus::FieldId, int> root_column_indices;
+    for (size_t index = 0; index < root_field_ids.size(); ++index) {
+        root_column_indices.emplace(root_field_ids[index],
+                                    prefix_column_count + index);
+    }
+
+    std::vector<std::shared_ptr<arrow::Field>> projection_fields(
+        projections.size());
+    std::vector<std::shared_ptr<arrow::Array>> projection_arrays(
+        projections.size());
+    std::vector<std::unique_ptr<arrow::ArrayBuilder>> json_builders(
+        projections.size());
+    std::map<milvus::FieldId, std::vector<size_t>> json_projection_indices;
+    std::vector<std::string> json_pointers(projections.size());
+
+    for (size_t index = 0; index < projections.size(); ++index) {
+        const auto& projection = projections[index];
+        auto root_it = root_column_indices.find(projection.source_field_id);
+        AssertInfo(root_it != root_column_indices.end(),
+                   "function chain projection source field {} is missing",
+                   projection.source_field_id.get());
+        if (!projection.is_json_path) {
+            projection_fields[index] =
+                root_batch->schema()->field(root_it->second);
+            projection_arrays[index] = root_batch->column(root_it->second);
+            continue;
+        }
+
+        json_pointers[index] =
+            milvus::Json::pointer(projection.nested_path_tokens);
+        projection_fields[index] = FunctionChainProjectionField(projection);
+        ARROW_ASSIGN_OR_RAISE(
+            json_builders[index],
+            arrow::MakeBuilder(projection_fields[index]->type()));
+        ARROW_RETURN_NOT_OK(
+            json_builders[index]->Reserve(root_batch->num_rows()));
+        json_projection_indices[projection.source_field_id].push_back(index);
+    }
+
+    for (const auto& [field_id, indices] : json_projection_indices) {
+        milvus::futures::throwIfCancelled(cancel_token);
+        auto root_column = std::dynamic_pointer_cast<arrow::BinaryArray>(
+            root_batch->column(root_column_indices.at(field_id)));
+        if (root_column == nullptr) {
+            return arrow::Status::Invalid(
+                "function chain JSON root column is not binary");
+        }
+
+        for (int64_t row = 0; row < root_batch->num_rows(); ++row) {
+            milvus::futures::throwIfCancelled(cancel_token);
+            if (root_column->IsNull(row)) {
+                for (auto index : indices) {
+                    ARROW_RETURN_NOT_OK(json_builders[index]->AppendNull());
+                }
+                continue;
+            }
+            auto raw = root_column->GetView(row);
+            simdjson::padded_string padded(raw.data(), raw.size());
+            if (padded.size() != raw.size()) {
+                ThrowFunctionChainJSONError(simdjson::MEMALLOC);
+            }
+            const milvus::Json json(std::move(padded));
+            for (auto index : indices) {
+                milvus::futures::throwIfCancelled(cancel_token);
+                ARROW_RETURN_NOT_OK(
+                    AppendFunctionChainJSONValue(json,
+                                                 projections[index],
+                                                 json_pointers[index],
+                                                 json_builders[index].get()));
+            }
+        }
+    }
+
+    for (size_t index = 0; index < projections.size(); ++index) {
+        if (json_builders[index] != nullptr) {
+            ARROW_RETURN_NOT_OK(
+                json_builders[index]->Finish(&projection_arrays[index]));
+        }
+    }
+
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    fields.reserve(prefix_column_count + projections.size());
+    arrays.reserve(prefix_column_count + projections.size());
+    for (int index = 0; index < prefix_column_count; ++index) {
+        fields.push_back(root_batch->schema()->field(index));
+        arrays.push_back(root_batch->column(index));
+    }
+    for (size_t index = 0; index < projections.size(); ++index) {
+        fields.push_back(std::move(projection_fields[index]));
+        arrays.push_back(std::move(projection_arrays[index]));
+    }
+    return arrow::RecordBatch::Make(arrow::schema(std::move(fields)),
+                                    root_batch->num_rows(),
+                                    std::move(arrays));
+}
+
+using OrderedFieldMap =
+    std::map<milvus::FieldId, std::unique_ptr<milvus::DataArray>>;
+
+void
+AssertSearchResultReadLeases(CSearchResult* search_results,
+                             int64_t num_search_results) {
+    AssertInfo(num_search_results >= 0,
+               "number of search results must not be negative");
+    AssertInfo(num_search_results == 0 || search_results != nullptr,
+               "null search results");
+    for (int64_t i = 0; i < num_search_results; ++i) {
+        AssertSearchResultReadLease(
+            static_cast<SearchResult*>(search_results[i]));
+    }
+}
+
+struct OrderedSegmentFields {
+    SearchResult* search_result;
+    std::vector<int64_t> segment_offsets;
+    std::vector<int64_t> result_positions;
+    OrderedFieldMap fields;
+    int64_t scanned_remote_bytes{0};
+    int64_t scanned_total_bytes{0};
+};
+
+template <typename MaterializeSegmentFields>
+OrderedFieldMap
+MaterializeOrderedFields(
+    CSearchResult* search_results,
+    int64_t num_search_results,
+    milvus::query::Plan* plan,
+    const std::vector<milvus::FieldId>& field_ids,
+    const int32_t* result_seg_indices,
+    const int64_t* result_seg_offsets,
+    int64_t total_rows,
+    const folly::CancellationToken& cancel_token,
+    MaterializeSegmentFields&& materialize_segment_fields) {
+    OrderedFieldMap ordered_fields;
+    if (total_rows == 0 || field_ids.empty()) {
+        return ordered_fields;
+    }
+
+    AssertInfo(num_search_results > 0,
+               "number of search results must be positive");
+    AssertInfo(result_seg_indices != nullptr,
+               "null segment indices for non-empty rows");
+    AssertInfo(result_seg_offsets != nullptr,
+               "null segment offsets for non-empty rows");
+
+    std::map<int32_t, OrderedSegmentFields> segment_fields;
+    for (int64_t position = 0; position < total_rows; ++position) {
+        auto segment_index = result_seg_indices[position];
+        AssertInfo(segment_index >= 0 && segment_index < num_search_results,
+                   "segment index {} out of range [0, {})",
+                   segment_index,
+                   num_search_results);
+        auto it =
+            segment_fields
+                .try_emplace(segment_index,
+                             OrderedSegmentFields{static_cast<SearchResult*>(
+                                 search_results[segment_index])})
+                .first;
+        it->second.result_positions.push_back(position);
+        it->second.segment_offsets.push_back(result_seg_offsets[position]);
+    }
+
+    auto materialize_one = [&](OrderedSegmentFields& materialized) {
+        milvus::futures::throwIfCancelled(cancel_token);
+        auto segment = static_cast<milvus::segcore::SegmentInternalInterface*>(
+            materialized.search_result->segment_);
+        AssertInfo(segment != nullptr, "search result has no segment");
+        materialize_segment_fields(segment, materialized);
+    };
+
+    const bool fanout =
+        segment_fields.size() > 1 &&
+        (milvus::cachinglayer::Manager::GetInstance().isEvictionEnabled() ||
+         total_rows >= milvus::segcore::kSearchFanoutMinRows ||
+         std::any_of(
+             field_ids.begin(),
+             field_ids.end(),
+             [&](auto field_id) {
+                 const auto type =
+                     plan->schema_->operator[](field_id).get_data_type();
+                 return milvus::IsVectorDataType(type) ||
+                        !milvus::IsFixedSizeType(type);
+             }) ||
+         // Mmap pages can fault even when cache eviction is disabled.
+         std::any_of(segment_fields.begin(),
+                     segment_fields.end(),
+                     [&field_ids](const auto& entry) {
+                         const auto* segment = static_cast<
+                             const milvus::segcore::SegmentInternalInterface*>(
+                             entry.second.search_result->segment_);
+                         return segment != nullptr &&
+                                std::any_of(
+                                    field_ids.begin(),
+                                    field_ids.end(),
+                                    [segment](auto field_id) {
+                                        return segment->is_mmap_field(field_id);
+                                    });
+                     }));
+    if (fanout) {
+        auto& pool = milvus::ThreadPools::GetThreadPool(
+            milvus::ThreadPoolPriority::SEARCH_FANOUT);
+        std::vector<std::future<void>> futures;
+        futures.reserve(segment_fields.size());
+        auto futures_guard = folly::makeGuard([&futures]() {
+            for (auto& future : futures) {
+                if (future.valid()) {
+                    try {
+                        future.get();
+                    } catch (...) {
+                    }
+                }
+            }
+        });
+        for (auto& entry : segment_fields) {
+            auto* materialized = &entry.second;
+            futures.emplace_back(pool.Submit([&materialize_one, materialized] {
+                materialize_one(*materialized);
+            }));
+        }
+        for (auto& future : futures) {
+            future.get();
+        }
+    } else {
+        for (auto& entry : segment_fields) {
+            materialize_one(entry.second);
+        }
+    }
+
+    std::vector<milvus::segcore::MergeBase> result_pairs(total_rows);
+    for (auto& entry : segment_fields) {
+        auto& materialized = entry.second;
+        materialized.search_result->search_storage_cost_.scanned_remote_bytes +=
+            materialized.scanned_remote_bytes;
+        materialized.search_result->search_storage_cost_.scanned_total_bytes +=
+            materialized.scanned_total_bytes;
+        for (size_t row_index = 0;
+             row_index < materialized.result_positions.size();
+             ++row_index) {
+            auto position = materialized.result_positions[row_index];
+            result_pairs[position] = {&materialized.fields, row_index};
+        }
+    }
+
+    // Nullable vector materialization may compact physical vector values while
+    // retaining a logical validity bitmap. Record the compacted physical offset
+    // for each output row before MergeDataArray scatters rows into final order.
+    for (auto& entry : segment_fields) {
+        auto& materialized = entry.second;
+        for (auto field_id : field_ids) {
+            auto& field_meta = plan->schema_->operator[](field_id);
+            if (!field_meta.is_vector() || !field_meta.is_nullable()) {
+                continue;
+            }
+            auto it = materialized.fields.find(field_id);
+            if (it == materialized.fields.end()) {
+                continue;
+            }
+            const auto& field_data = it->second;
+            const auto& valid_data =
+                milvus::GetFieldDataRowValidData(*field_data);
+            if (valid_data.empty()) {
+                continue;
+            }
+            int64_t valid_index = 0;
+            for (size_t row_index = 0;
+                 row_index < materialized.result_positions.size();
+                 ++row_index) {
+                auto position = materialized.result_positions[row_index];
+                result_pairs[position].setValidDataOffset(field_id,
+                                                          valid_index);
+                if (valid_data[row_index]) {
+                    ++valid_index;
+                }
+            }
+        }
+    }
+
+    for (auto field_id : field_ids) {
+        auto& field_meta = plan->schema_->operator[](field_id);
+        ordered_fields[field_id] =
+            milvus::segcore::MergeDataArray(result_pairs, field_meta);
+    }
+    return ordered_fields;
+}
+
+}  // namespace
+
+CStatus
+ExportSearchResultAsArrowRecordBatchWithInputPlan(CSearchResult c_search_result,
+                                                  CSearchPlan c_plan,
+                                                  const void* input_plan_blob,
+                                                  int64_t input_plan_size,
+                                                  ArrowSchema* out_schema,
+                                                  ArrowArray* out_array,
+                                                  int64_t** out_chunk_sizes,
+                                                  int64_t* out_num_chunks,
+                                                  void* cancellation_source) {
+    try {
+        SCOPE_CGO_CALL_METRIC();
+        AssertInfo(c_plan != nullptr, "null search plan");
+        auto plan = static_cast<milvus::query::Plan*>(c_plan);
+        std::vector<FunctionChainInputProjection> projections;
+        if (input_plan_size != 0) {
+            projections = ParseFunctionChainInputPlan(
+                plan, input_plan_blob, input_plan_size);
+        }
+        auto root_field_ids = UniqueProjectionSourceFieldIDs(projections);
+        std::vector<int64_t> raw_root_field_ids;
+        raw_root_field_ids.reserve(root_field_ids.size());
+        for (auto field_id : root_field_ids) {
+            raw_root_field_ids.push_back(field_id.get());
+        }
+        AssertInfo(out_schema != nullptr, "null ArrowSchema output");
+        AssertInfo(out_array != nullptr, "null ArrowArray output");
+        AssertInfo(out_schema->release == nullptr,
+                   "ArrowSchema output must be empty before export");
+        AssertInfo(out_array->release == nullptr,
+                   "ArrowArray output must be empty before export");
+        AssertInfo(out_chunk_sizes != nullptr, "null chunk sizes output");
+        AssertInfo(out_num_chunks != nullptr, "null chunk size count output");
+        *out_chunk_sizes = nullptr;
+        *out_num_chunks = 0;
+        auto cleanup = folly::makeGuard([&] {
+            ReleaseArrowArrayIfNeeded(out_array);
+            ReleaseArrowSchemaIfNeeded(out_schema);
+            free(*out_chunk_sizes);
+            *out_chunk_sizes = nullptr;
+            *out_num_chunks = 0;
+        });
+        AssertSearchResultReadLease(
+            static_cast<SearchResult*>(c_search_result));
+        auto cancel_token = folly::CancellationToken();
+        if (cancellation_source != nullptr) {
+            auto source =
+                static_cast<folly::CancellationSource*>(cancellation_source);
+            cancel_token = source->getToken();
+        }
+        std::shared_ptr<arrow::RecordBatch> batch;
+        auto status = BuildSearchResultFullBatch(c_search_result,
+                                                 c_plan,
+                                                 raw_root_field_ids.data(),
+                                                 raw_root_field_ids.size(),
+                                                 &batch,
+                                                 out_chunk_sizes,
+                                                 out_num_chunks,
+                                                 cancel_token);
+        if (status.error_code != 0) {
+            return status;
+        }
+        if (!projections.empty()) {
+            auto prefix_column_count =
+                batch->num_columns() - static_cast<int>(root_field_ids.size());
+            // Project native arrays before exporting. Importing an intermediate
+            // C batch would make every retained column own all JSON roots.
+            auto projected_batch =
+                ProjectFunctionChainInputBatch(batch,
+                                               root_field_ids,
+                                               projections,
+                                               prefix_column_count,
+                                               cancel_token);
+            if (!projected_batch.ok()) {
+                return ArrowExportFailure(projected_batch.status());
+            }
+            batch = *projected_batch;
+        }
+        auto export_status =
+            arrow::ExportRecordBatch(*batch, out_array, out_schema);
+        if (!export_status.ok()) {
+            return ArrowExportFailure(export_status);
+        }
+        cleanup.dismiss();
+        return milvus::SuccessCStatus();
+    } catch (folly::FutureCancellation& e) {
+        return milvus::FailureCStatus(milvus::ErrorCode::FollyCancel, e.what());
+    }
+    CGO_CATCH_AND_RETURN_CSTATUS
+}
+
+CStatus
+FillOutputFieldsOrderedImpl(CSearchResult* search_results,
+                            int64_t num_search_results,
+                            CSearchPlan c_plan,
+                            const int32_t* result_seg_indices,
+                            const int64_t* result_seg_offsets,
+                            int64_t total_rows,
+                            CProto* out_result,
+                            const folly::CancellationToken& cancel_token) {
+    SCOPE_CGO_CALL_METRIC();
+
+    try {
+        AssertEmptyCProto(out_result);
+        auto plan = static_cast<milvus::query::Plan*>(c_plan);
+        AssertSearchResultReadLeases(search_results, num_search_results);
+
+        if (plan->target_entries_.empty()) {
+            return milvus::SuccessCStatus();
+        }
+
+        // When total_rows is 0 but target_entries_ is non-empty, produce a
+        // SearchResultData proto with properly typed but empty FieldData
+        // entries for each output field. The delegator-side reduce
+        // (ReduceSearchResultData) uses searchResultData[0].FieldsData
+        // length to initialize the output structure; if we return nullptr
+        // here, the output FieldsData has 0 entries, causing an
+        // index-out-of-range panic when merging with non-empty results.
+        if (total_rows == 0) {
+            auto& schema = plan->schema_;
+            auto result_data =
+                std::make_unique<milvus::proto::schema::SearchResultData>();
+            for (auto& field_id : plan->target_entries_) {
+                auto& field_meta = schema->operator[](field_id);
+                auto field_data =
+                    field_meta.is_vector()
+                        ? milvus::segcore::CreateEmptyVectorDataArray(
+                              0, field_meta)
+                        : milvus::segcore::CreateEmptyScalarDataArray(
+                              0, field_meta);
+                field_data->set_field_name(field_meta.get_name().get());
+                SetFieldDataElementTypeIfNeeded(field_data.get(), field_meta);
+                result_data->mutable_fields_data()->AddAllocated(
+                    field_data.release());
+            }
+            return SerializeSearchResultDataToCProto(
+                *result_data,
+                out_result,
+                "failed to allocate for empty field data proto",
+                "failed to serialize empty field data proto");
+        }
+
+        std::vector<milvus::FieldId> field_ids(plan->target_entries_.begin(),
+                                               plan->target_entries_.end());
+        auto ordered_fields = MaterializeOrderedFields(
+            search_results,
+            num_search_results,
+            plan,
+            field_ids,
+            result_seg_indices,
+            result_seg_offsets,
+            total_rows,
+            cancel_token,
+            [plan, &cancel_token](
+                milvus::segcore::SegmentInternalInterface* segment,
+                OrderedSegmentFields& materialized) {
+                SearchResult temp_result;
+                temp_result.segment_ = materialized.search_result->segment_;
+                temp_result.read_snapshot_ =
+                    materialized.search_result->read_snapshot_;
+                temp_result.seg_offsets_ = materialized.segment_offsets;
+                temp_result.distances_.resize(
+                    materialized.segment_offsets.size(), 0.0f);
+                milvus::OpContext op_ctx(cancel_token);
+                segment->FillTargetEntry(plan, temp_result, &op_ctx);
+                materialized.fields =
+                    std::move(temp_result.output_fields_data_);
+                materialized.scanned_remote_bytes =
+                    temp_result.search_storage_cost_.scanned_remote_bytes;
+                materialized.scanned_total_bytes =
+                    temp_result.search_storage_cost_.scanned_total_bytes;
+            });
+        auto result_data =
+            std::make_unique<milvus::proto::schema::SearchResultData>();
+        for (auto field_id : field_ids) {
+            auto& field_meta = plan->schema_->operator[](field_id);
+            auto field_data = std::move(ordered_fields[field_id]);
+            SetFieldDataElementTypeIfNeeded(field_data.get(), field_meta);
+            result_data->mutable_fields_data()->AddAllocated(
+                field_data.release());
+        }
+
+        return SerializeSearchResultDataToCProto(
+            *result_data,
+            out_result,
+            "failed to allocate memory for proto serialization",
+            "failed to serialize SearchResultData proto");
+    } catch (folly::FutureCancellation& e) {
+        return milvus::FailureCStatus(milvus::ErrorCode::FollyCancel, e.what());
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+FillOutputFieldsOrdered(CSearchResult* search_results,
+                        int64_t num_search_results,
+                        CSearchPlan c_plan,
+                        const int32_t* result_seg_indices,
+                        const int64_t* result_seg_offsets,
+                        int64_t total_rows,
+                        CProto* out_result,
+                        void* cancellation_source) {
+    if (cancellation_source != nullptr) {
+        auto source =
+            static_cast<folly::CancellationSource*>(cancellation_source);
+        return FillOutputFieldsOrderedImpl(search_results,
+                                           num_search_results,
+                                           c_plan,
+                                           result_seg_indices,
+                                           result_seg_offsets,
+                                           total_rows,
+                                           out_result,
+                                           source->getToken());
+    }
+
+    return FillOutputFieldsOrderedImpl(search_results,
+                                       num_search_results,
+                                       c_plan,
+                                       result_seg_indices,
+                                       result_seg_offsets,
+                                       total_rows,
+                                       out_result,
+                                       folly::CancellationToken());
+}
+
+// Keep materialization uninstrumented; the public projection entry point
+// records the CGO metric once per call.
+static CStatus
+FillFieldsOrderedAsArrowRecordBatchImpl(
+    CSearchResult* search_results,
+    int64_t num_search_results,
+    CSearchPlan c_plan,
+    const int64_t* field_ids,
+    int64_t num_fields,
+    const int32_t* result_seg_indices,
+    const int64_t* result_seg_offsets,
+    int64_t total_rows,
+    ArrowSchema* out_schema,
+    ArrowArray* out_array,
+    void* cancellation_source,
+    const std::vector<FunctionChainInputProjection>& projections) {
+    try {
+        AssertInfo(search_results != nullptr, "null search results");
+        AssertInfo(num_search_results > 0,
+                   "number of search results must be positive");
+        AssertInfo(c_plan != nullptr, "null search plan");
+        AssertInfo(num_fields >= 0, "number of fields must not be negative");
+        AssertInfo(total_rows >= 0, "number of rows must not be negative");
+        AssertInfo(num_fields == 0 || field_ids != nullptr,
+                   "null field ids for non-empty field list");
+        AssertInfo(total_rows == 0 || result_seg_indices != nullptr,
+                   "null segment indices for non-empty rows");
+        AssertInfo(total_rows == 0 || result_seg_offsets != nullptr,
+                   "null segment offsets for non-empty rows");
+        AssertInfo(out_schema != nullptr, "null ArrowSchema output");
+        AssertInfo(out_array != nullptr, "null ArrowArray output");
+        AssertInfo(out_schema->release == nullptr,
+                   "ArrowSchema output must be empty before export");
+        AssertInfo(out_array->release == nullptr,
+                   "ArrowArray output must be empty before export");
+        auto cleanup = folly::makeGuard([&] {
+            ReleaseArrowArrayIfNeeded(out_array);
+            ReleaseArrowSchemaIfNeeded(out_schema);
+        });
+
+        auto cancel_token = folly::CancellationToken();
+        if (cancellation_source != nullptr) {
+            auto source =
+                static_cast<folly::CancellationSource*>(cancellation_source);
+            cancel_token = source->getToken();
+        }
+        auto plan = static_cast<milvus::query::Plan*>(c_plan);
+        AssertSearchResultReadLeases(search_results, num_search_results);
+        std::vector<milvus::FieldId> requested_field_ids;
+        requested_field_ids.reserve(num_fields);
+        for (int64_t field_index = 0; field_index < num_fields; ++field_index) {
+            requested_field_ids.emplace_back(field_ids[field_index]);
+        }
+        auto ordered_fields = MaterializeOrderedFields(
+            search_results,
+            num_search_results,
+            plan,
+            requested_field_ids,
+            result_seg_indices,
+            result_seg_offsets,
+            total_rows,
+            cancel_token,
+            [plan, &requested_field_ids, &cancel_token](
+                milvus::segcore::SegmentInternalInterface* segment,
+                OrderedSegmentFields& materialized) {
+                milvus::OpContext op_ctx(cancel_token);
+                for (auto field_id : requested_field_ids) {
+                    milvus::futures::throwIfCancelled(cancel_token);
+                    auto& field_meta = plan->schema_->operator[](field_id);
+                    materialized.fields[field_id] =
+                        milvus::segcore::BulkSubscriptWithSnapshot(
+                            segment,
+                            materialized.search_result->read_snapshot_,
+                            &op_ctx,
+                            field_id,
+                            field_meta,
+                            materialized.segment_offsets.data(),
+                            materialized.segment_offsets.size());
+                }
+                materialized.scanned_remote_bytes =
+                    op_ctx.storage_usage.scanned_cold_bytes.load();
+                materialized.scanned_total_bytes =
+                    op_ctx.storage_usage.scanned_total_bytes.load();
+            });
+
+        auto batch_result = BuildExplicitFieldsBatch(
+            plan, field_ids, num_fields, ordered_fields, total_rows);
+        if (!batch_result.ok()) {
+            return ArrowExportFailure(batch_result.status());
+        }
+        // Conversion copied the protobuf values into Arrow buffers. Drop the
+        // materialized roots before allocating JSON projection builders.
+        ordered_fields.clear();
+        // Keep native per-column ownership until projection has discarded
+        // the JSON roots, then cross the C Data Interface only once.
+        batch_result = ProjectFunctionChainInputBatch(
+            *batch_result, requested_field_ids, projections, 0, cancel_token);
+        if (!batch_result.ok()) {
+            return ArrowExportFailure(batch_result.status());
+        }
+        auto export_status =
+            arrow::ExportRecordBatch(**batch_result, out_array, out_schema);
+        if (!export_status.ok()) {
+            return ArrowExportFailure(export_status);
+        }
+        cleanup.dismiss();
+        return milvus::SuccessCStatus();
+    } catch (folly::FutureCancellation& e) {
+        return milvus::FailureCStatus(milvus::ErrorCode::FollyCancel, e.what());
+    }
+    CGO_CATCH_AND_RETURN_CSTATUS
+}
+
+CStatus
+FillFieldsOrderedAsArrowRecordBatchWithInputPlan(
+    CSearchResult* search_results,
+    int64_t num_search_results,
+    CSearchPlan c_plan,
+    const void* input_plan_blob,
+    int64_t input_plan_size,
+    const int32_t* result_seg_indices,
+    const int64_t* result_seg_offsets,
+    int64_t total_rows,
+    ArrowSchema* out_schema,
+    ArrowArray* out_array,
+    void* cancellation_source) {
+    try {
+        SCOPE_CGO_CALL_METRIC();
+        AssertInfo(c_plan != nullptr, "null search plan");
+        auto plan = static_cast<milvus::query::Plan*>(c_plan);
+        auto parsed_projections =
+            ParseFunctionChainInputPlan(plan, input_plan_blob, input_plan_size);
+        auto root_field_ids =
+            UniqueProjectionSourceFieldIDs(parsed_projections);
+        std::vector<int64_t> raw_root_field_ids;
+        raw_root_field_ids.reserve(root_field_ids.size());
+        for (auto field_id : root_field_ids) {
+            raw_root_field_ids.push_back(field_id.get());
+        }
+
+        return FillFieldsOrderedAsArrowRecordBatchImpl(
+            search_results,
+            num_search_results,
+            c_plan,
+            raw_root_field_ids.data(),
+            static_cast<int64_t>(raw_root_field_ids.size()),
+            result_seg_indices,
+            result_seg_offsets,
+            total_rows,
+            out_schema,
+            out_array,
+            cancellation_source,
+            parsed_projections);
+    } catch (folly::FutureCancellation& e) {
+        return milvus::FailureCStatus(milvus::ErrorCode::FollyCancel, e.what());
+    }
+    CGO_CATCH_AND_RETURN_CSTATUS
+}
+
+void
+GetSearchResultMetadata(CSearchResult c_search_result,
+                        bool* has_group_by,
+                        int64_t* group_size,
+                        int64_t* scanned_remote_bytes,
+                        int64_t* scanned_total_bytes) {
+    auto search_result = static_cast<SearchResult*>(c_search_result);
+    *has_group_by = search_result->composite_group_by_values_.has_value();
+    *group_size = search_result->group_size_.value_or(0);
+    *scanned_remote_bytes =
+        search_result->search_storage_cost_.scanned_remote_bytes;
+    *scanned_total_bytes =
+        search_result->search_storage_cost_.scanned_total_bytes;
+}
+
+CStatus
+PrepareSearchResultsForExportImpl(
+    CTraceContext c_trace,
+    CSearchPlan c_plan,
+    CPlaceholderGroup c_placeholder_group,
+    CSearchResult* c_search_results,
+    int64_t num_segments,
+    int64_t* slice_nqs,
+    int64_t num_slices,
+    int64_t* slice_topKs,
+    int64_t* all_search_count,
+    const folly::CancellationToken& cancel_token) {
+    SCOPE_CGO_CALL_METRIC();
+
+    try {
+        AssertInfo(num_segments > 0, "num_segments must be greater than 0");
+        AssertInfo(num_slices > 0, "num_slices must be greater than 0");
+        milvus::futures::throwIfCancelled(cancel_token);
+
+        auto plan = static_cast<milvus::query::Plan*>(c_plan);
+        auto placeholder_group =
+            static_cast<const milvus::query::PlaceholderGroup*>(
+                c_placeholder_group);
+        auto trace_ctx = milvus::tracer::TraceContext{
+            c_trace.traceID, c_trace.spanID, c_trace.traceFlags};
+        std::vector<milvus::SearchResult*> search_results;
+        search_results.reserve(num_segments);
+        for (int64_t i = 0; i < num_segments; ++i) {
+            AssertInfo(c_search_results[i] != nullptr,
+                       "null search result at index {}",
+                       i);
+            auto result =
+                static_cast<milvus::SearchResult*>(c_search_results[i]);
+            AssertSearchResultReadLease(result);
+            search_results.push_back(result);
+        }
+
+        milvus::OpContext op_ctx(cancel_token);
+        milvus::segcore::ReduceHelper helper(search_results,
+                                             plan,
+                                             placeholder_group,
+                                             slice_nqs,
+                                             slice_topKs,
+                                             num_slices,
+                                             &trace_ctx,
+                                             &op_ctx);
+        helper.PreReduce();
+        if (all_search_count != nullptr) {
+            *all_search_count = helper.GetAllSearchCount();
+        }
+        return milvus::SuccessCStatus();
+    } catch (folly::FutureCancellation& e) {
+        return milvus::FailureCStatus(milvus::ErrorCode::FollyCancel, e.what());
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+PrepareSearchResultsForExport(CTraceContext c_trace,
+                              CSearchPlan c_plan,
+                              CPlaceholderGroup c_placeholder_group,
+                              CSearchResult* c_search_results,
+                              int64_t num_segments,
+                              int64_t* slice_nqs,
+                              int64_t num_slices,
+                              int64_t* slice_topKs,
+                              int64_t* all_search_count,
+                              void* cancellation_source) {
+    if (cancellation_source != nullptr) {
+        auto source =
+            static_cast<folly::CancellationSource*>(cancellation_source);
+        return PrepareSearchResultsForExportImpl(c_trace,
+                                                 c_plan,
+                                                 c_placeholder_group,
+                                                 c_search_results,
+                                                 num_segments,
+                                                 slice_nqs,
+                                                 num_slices,
+                                                 slice_topKs,
+                                                 all_search_count,
+                                                 source->getToken());
+    }
+
+    return PrepareSearchResultsForExportImpl(c_trace,
+                                             c_plan,
+                                             c_placeholder_group,
+                                             c_search_results,
+                                             num_segments,
+                                             slice_nqs,
+                                             num_slices,
+                                             slice_topKs,
+                                             all_search_count,
+                                             folly::CancellationToken());
+}

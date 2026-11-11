@@ -1,0 +1,37 @@
+# Copyright (C) 2019-2022 Zilliz. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed under the License
+# is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+# or implied. See the License for the specific language governing permissions and limitations under the License.
+ARG MILVUS_BASE_IMAGE_REPO="milvusdb/milvus-base"
+ARG MILVUS_BASE_IMAGE_TAG="gpu-20230822-34f9067"
+FROM ${MILVUS_BASE_IMAGE_REPO}:${MILVUS_BASE_IMAGE_TAG}
+
+ARG MILVUS_RUNTIME_USER=milvus:milvus
+
+# Upgrade openssl to fix CVE-2026-45447 (base image is a pinned/legacy ubuntu20.04 build)
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends openssl libssl1.1 curl libcurl4 tar zlib1g libc6 libc-bin && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r milvus && useradd -r -g milvus milvus && \
+    install -d -o milvus -g milvus /milvus /milvus/bin /var/lib/milvus
+COPY --chown=milvus:milvus --chmod=774 ./bin/milvus /milvus/bin/milvus
+
+COPY --chown=milvus:milvus --chmod=774 ./configs/ /milvus/configs/
+
+COPY --chown=milvus:milvus --chmod=774 ./lib/ /milvus/lib/
+
+
+ENV PATH=/milvus/bin:$PATH
+ENV LD_LIBRARY_PATH=/milvus/lib:$LD_LIBRARY_PATH:/usr/lib
+ENV LD_PRELOAD=/milvus/lib/libjemalloc.so
+ENV MALLOC_CONF=background_thread:true
+
+# Run as milvus by default; downstream images may select another user at build time.
+USER ${MILVUS_RUNTIME_USER}

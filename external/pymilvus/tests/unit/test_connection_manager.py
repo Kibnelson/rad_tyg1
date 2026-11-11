@@ -1,0 +1,2735 @@
+# tests/unit/test_connection_manager.py
+"""Tests for ConnectionManager and related classes."""
+
+import asyncio
+import threading
+import time
+from unittest.mock import AsyncMock, Mock, patch
+
+import grpc
+import pytest
+from pymilvus import AsyncMilvusClient, MilvusClient
+from pymilvus.client.async_grpc_handler import AsyncGrpcHandler
+from pymilvus.client.connection_manager import (
+    IDLE_THRESHOLD_SECONDS,
+    AsyncConnectionManager,
+    AsyncGlobalStrategy,
+    AsyncRegularStrategy,
+    ConnectionConfig,
+    ConnectionManager,
+    GlobalStrategy,
+    GlobalTopology,
+    ManagedConnection,
+    RegularStrategy,
+    _GlobalStrategyMixin,
+)
+from pymilvus.client.global_topology import ClusterInfo
+from pymilvus.client.grpc_handler import GrpcHandler
+from pymilvus.exceptions import ConnectionConfigException, MilvusException
+
+# =============================================================================
+# Module-level helpers
+# =============================================================================
+
+
+class _MockRpcError(grpc.RpcError):
+    """Reusable UNAVAILABLE RPC error for tests."""
+
+    def code(self):
+        return grpc.StatusCode.UNAVAILABLE
+
+
+def _make_sync_handler(**overrides):
+    """Create a mock sync GrpcHandler with standard attributes."""
+    handler = Mock()
+    handler._wait_for_channel_ready = Mock()
+    handler.close = Mock()
+    handler.reconnect = Mock()
+    for k, v in overrides.items():
+        setattr(handler, k, v)
+    return handler
+
+
+def _make_async_handler(**overrides):
+    """Create a mock async GrpcHandler with standard attributes."""
+    handler = Mock(spec=[])
+    handler.ensure_channel_ready = AsyncMock()
+    handler.close = AsyncMock()
+    handler.reconnect = AsyncMock()
+    for k, v in overrides.items():
+        setattr(handler, k, v)
+    return handler
+
+
+class _NotFoundRpcError(grpc.RpcError):
+    """Reusable NOT_FOUND RPC error for tests."""
+
+    def code(self):
+        return grpc.StatusCode.NOT_FOUND
+
+
+def _make_topology(version, cluster_id, endpoint, capability=3):
+    """Create a single-cluster GlobalTopology for tests."""
+    return GlobalTopology(
+        version=version,
+        clusters=[ClusterInfo(cluster_id=cluster_id, endpoint=endpoint, capability=capability)],
+    )
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def mock_grpc_handler():
+    """Create a mock GrpcHandler."""
+    return _make_sync_handler(get_server_type=Mock(return_value="milvus"))
+
+
+@pytest.fixture
+def mock_async_handler():
+    """Create a mock AsyncGrpcHandler."""
+    return _make_async_handler(get_server_type=AsyncMock(return_value="milvus"))
+
+
+@pytest.fixture
+def sample_topology():
+    """Create a sample GlobalTopology for testing."""
+    return _make_topology(1, "c1", "https://primary:19530", capability=0b11)
+
+
+@pytest.fixture(autouse=True)
+def reset_connection_managers():
+    """Reset connection managers before and after each test."""
+    ConnectionManager._reset_instance()
+    AsyncConnectionManager._reset_instance()
+    yield
+    ConnectionManager._reset_instance()
+    AsyncConnectionManager._reset_instance()
+
+
+# =============================================================================
+# TestConnectionConfig - URI parsing tests
+# =============================================================================
+
+
+class TestConnectionConfig:
+    """Tests for ConnectionConfig dataclass."""
+
+    @pytest.mark.parametrize(
+        "uri,token,db_name,expected",
+        [
+            # Basic URI parsing
+            (
+                "http://localhost:19530",
+                None,
+                None,
+                {"address": "localhost:19530", "token": "", "db_name": ""},
+            ),
+            (
+                "https://host.example.com:19530",
+                None,
+                None,
+                {"address": "host.example.com:19530", "token": "", "db_name": ""},
+            ),
+            # URI with credentials
+            (
+                "https://user:pass@host:19530",
+                None,
+                None,
+                {"address": "host:19530", "token": "user:pass", "db_name": ""},
+            ),
+            # URI with database path
+            (
+                "https://host:19530/mydb",
+                None,
+                None,
+                {"address": "host:19530", "token": "", "db_name": "mydb"},
+            ),
+            # Full URI with all components
+            (
+                "https://user:pass@host:19530/mydb",
+                None,
+                None,
+                {"address": "host:19530", "token": "user:pass", "db_name": "mydb"},
+            ),
+            # Default port — http → 19530
+            (
+                "http://localhost",
+                None,
+                None,
+                {"address": "localhost:19530", "token": "", "db_name": ""},
+            ),
+            # Default port — https → 443
+            (
+                "https://host.example.com",
+                None,
+                None,
+                {"address": "host.example.com:443", "token": "", "db_name": ""},
+            ),
+            # Explicit port preserved on https
+            (
+                "https://host.example.com:8443",
+                None,
+                None,
+                {"address": "host.example.com:8443", "token": "", "db_name": ""},
+            ),
+            # Explicit params override URI
+            (
+                "https://user:pass@host:19530/db1",
+                "other_token",
+                "db2",
+                {
+                    "address": "host:19530",
+                    "token": "other_token",
+                    "db_name": "db2",
+                },
+            ),
+        ],
+    )
+    def test_from_uri(self, uri, token, db_name, expected):
+        """Test URI parsing with various formats."""
+        kwargs = {}
+        if token is not None:
+            kwargs["token"] = token
+        if db_name is not None:
+            kwargs["db_name"] = db_name
+
+        config = ConnectionConfig.from_uri(uri, **kwargs)
+
+        assert config.address == expected["address"]
+        assert config.token == expected["token"]
+        assert config.db_name == expected["db_name"]
+
+    @pytest.mark.parametrize(
+        "uri,expected_key",
+        [
+            ("https://user:pass@host:19530", "host:19530|user:pass"),
+            ("http://localhost:19530", "localhost:19530|"),
+        ],
+    )
+    def test_key_property(self, uri, expected_key):
+        """Test key property for connection deduplication."""
+        config = ConnectionConfig.from_uri(uri)
+        assert config.key == expected_key
+
+    @pytest.mark.parametrize(
+        "uri,expected_is_global",
+        [
+            ("https://global-cluster.example.com:19530", True),
+            ("http://localhost:19530", False),
+            ("https://in01-xxx.zilliz.com:19530", False),
+        ],
+    )
+    def test_is_global(self, uri, expected_is_global):
+        """Test global cluster endpoint detection."""
+        config = ConnectionConfig.from_uri(uri)
+        assert config.is_global == expected_is_global
+
+    def test_invalid_scheme_raises(self):
+        """Test that an unsupported URI scheme raises ConnectionConfigException."""
+        with pytest.raises(ConnectionConfigException, match="is illegal"):
+            ConnectionConfig.from_uri("ftp://host:19530")
+
+    def test_local_db_skips_scheme_check(self):
+        """Test that .db files skip scheme validation and go through milvus-lite."""
+        mock_manager = Mock()
+        mock_manager.start_and_get_uri.return_value = "http://127.0.0.1:12345"
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "milvus_lite": Mock(),
+                "milvus_lite.server_manager": Mock(server_manager_instance=mock_manager),
+            },
+        ):
+            config = ConnectionConfig.from_uri("mydata.db")
+            assert config.address == "127.0.0.1:12345"
+
+    def test_milvus_lite_rewrites_uri(self, tmp_path):
+        """Milvus-Lite URI rewrite: from_uri('./test.db') rewrites to local gRPC URI."""
+        db_path = str(tmp_path / "test.db")
+        mock_manager = Mock()
+        mock_manager.start_and_get_uri.return_value = "http://127.0.0.1:12345"
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "milvus_lite": Mock(),
+                "milvus_lite.server_manager": Mock(server_manager_instance=mock_manager),
+            },
+        ):
+            config = ConnectionConfig.from_uri(db_path)
+            mock_manager.start_and_get_uri.assert_called_once_with(db_path)
+            assert config.uri == "http://127.0.0.1:12345"
+            assert config.address == "127.0.0.1:12345"
+
+    def test_milvus_lite_parent_dir_missing(self):
+        """ConnectionConfigException when parent directory doesn't exist."""
+        with pytest.raises(ConnectionConfigException, match="not exists"):
+            ConnectionConfig.from_uri("/nonexistent/dir/test.db")
+
+    def test_milvus_lite_import_error(self, tmp_path):
+        """Helpful error when milvus-lite is not installed."""
+        db_path = str(tmp_path / "test.db")
+
+        with patch.dict("sys.modules", {"milvus_lite": None, "milvus_lite.server_manager": None}):
+            with pytest.raises(ConnectionConfigException, match="milvus-lite is required"):
+                ConnectionConfig.from_uri(db_path)
+
+    def test_milvus_lite_returns_none(self, tmp_path):
+        """ConnectionConfigException when start_and_get_uri returns None."""
+        db_path = str(tmp_path / "test.db")
+        mock_manager = Mock()
+        mock_manager.start_and_get_uri.return_value = None
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "milvus_lite": Mock(),
+                "milvus_lite.server_manager": Mock(server_manager_instance=mock_manager),
+            },
+        ):
+            with pytest.raises(ConnectionConfigException, match="Open local milvus failed"):
+                ConnectionConfig.from_uri(db_path)
+
+    def test_unix_socket_address(self):
+        """Unix socket URI is passed through as address."""
+        config = ConnectionConfig.from_uri("unix:///tmp/milvus.sock")
+        assert config.address == "unix:///tmp/milvus.sock"
+        assert config.uri == "unix:///tmp/milvus.sock"
+
+    def test_unix_socket_with_token(self):
+        """Unix socket preserves token and db_name."""
+        config = ConnectionConfig.from_uri(
+            "unix:///tmp/milvus.sock", token="root:milvus", db_name="mydb"
+        )
+        assert config.token == "root:milvus"
+        assert config.db_name == "mydb"
+
+    def test_https_sets_secure_true(self):
+        """HTTPS URI auto-sets secure=True in handler_kwargs."""
+        config = ConnectionConfig.from_uri("https://host:443")
+        kwargs = config.get_handler_kwargs()
+        assert kwargs.get("secure") is True
+
+    def test_https_explicit_secure_false(self):
+        """Explicit secure=False overrides HTTPS auto-detect."""
+        config = ConnectionConfig.from_uri("https://host:443", secure=False)
+        kwargs = config.get_handler_kwargs()
+        assert kwargs.get("secure") is False
+
+    def test_http_no_auto_secure(self):
+        """HTTP URI does not set secure."""
+        config = ConnectionConfig.from_uri("http://host:19530")
+        kwargs = config.get_handler_kwargs()
+        assert "secure" not in kwargs
+
+    def test_extra_kwargs_stored(self):
+        """Extra kwargs are stored and retrievable."""
+        config = ConnectionConfig.from_uri(
+            "http://host:19530",
+            grpc_options={"max_receive_message_length": 100},
+        )
+        kwargs = config.get_handler_kwargs()
+        assert kwargs["grpc_options"] == {"max_receive_message_length": 100}
+
+    def test_handler_kwargs_forwarded_to_grpc_handler(self):
+        """handler_kwargs are forwarded when creating a GrpcHandler."""
+        config = ConnectionConfig.from_uri("http://host:19530", secure=True)
+        strategy = RegularStrategy()
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = Mock()
+            strategy.create_handler(config)
+            mock_handler_cls.assert_called_once_with(
+                uri=config.uri,
+                address=config.address,
+                token=config.token,
+                db_name=config.db_name,
+                secure=True,
+            )
+
+    def test_handler_kwargs_forwarded_async(self):
+        """handler_kwargs are forwarded when creating an AsyncGrpcHandler."""
+        config = ConnectionConfig.from_uri("http://host:19530", secure=True)
+        strategy = AsyncRegularStrategy()
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = Mock()
+            strategy.create_handler(config)
+            mock_handler_cls.assert_called_once_with(
+                uri=config.uri,
+                address=config.address,
+                token=config.token,
+                db_name=config.db_name,
+                secure=True,
+            )
+
+    def test_empty_handler_kwargs(self):
+        """Default handler_kwargs is empty."""
+        config = ConnectionConfig.from_uri("http://host:19530")
+        assert config.get_handler_kwargs() == {}
+
+
+# =============================================================================
+# TestRegularStrategy
+# =============================================================================
+
+
+class TestRegularStrategy:
+    """Tests for RegularStrategy."""
+
+    def test_create_handler(self):
+        """Test handler creation with config params."""
+        config = ConnectionConfig.from_uri("https://host:19530/mydb", token="mytoken")
+        strategy = RegularStrategy()
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = Mock()
+            handler = strategy.create_handler(config)
+
+            mock_handler_cls.assert_called_once_with(
+                uri="https://host:19530/mydb",
+                address="host:19530",
+                token="mytoken",
+                db_name="mydb",
+                secure=True,
+            )
+            assert handler is mock_handler_cls.return_value
+
+    def test_close_and_on_unavailable(self):
+        """Test close and on_unavailable behavior."""
+        config = ConnectionConfig.from_uri("http://localhost:19530")
+        strategy = RegularStrategy()
+        handler = Mock()
+        managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+        # on_unavailable always returns True for regular connections
+        assert strategy.on_unavailable(managed) is True
+
+        # close calls handler.close()
+        strategy.close(managed)
+        handler.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_close_async_delegates_to_close(self):
+        """Test base class close_async calls sync close."""
+        strategy = RegularStrategy()
+        handler = Mock()
+        handler.close = Mock()
+        config = ConnectionConfig.from_uri("http://localhost:19530")
+        managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+        # RegularStrategy doesn't override close_async, so base class is used
+        await strategy.close_async(managed)
+        handler.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_regular_strategy_close_with_running_loop(self):
+        """Test AsyncRegularStrategy sync close creates fire-and-forget task when loop running."""
+        strategy = AsyncRegularStrategy()
+        handler = Mock()
+        handler.close = AsyncMock()
+        config = ConnectionConfig.from_uri("http://localhost:19530")
+        managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+        strategy.close(managed)
+        # Give the event loop a chance to execute the task
+        await asyncio.sleep(0)
+        handler.close.assert_awaited_once()
+
+
+# =============================================================================
+# TestGlobalStrategy
+# =============================================================================
+
+
+class TestGlobalStrategy:
+    """Tests for GlobalStrategy."""
+
+    @patch("pymilvus.client.connection_manager.TopologyRefresher")
+    @patch("pymilvus.client.grpc_handler.GrpcHandler")
+    @patch("pymilvus.client.connection_manager.fetch_topology")
+    def test_create_handler_fetches_topology(
+        self, mock_fetch, mock_handler_cls, mock_refresher_cls, sample_topology
+    ):
+        """Test handler creation fetches topology, connects to primary, starts refresher."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        mock_fetch.return_value = sample_topology
+        mock_refresher = Mock()
+        mock_refresher_cls.return_value = mock_refresher
+        mock_handler_cls.return_value = Mock()
+
+        strategy = GlobalStrategy()
+        handler = strategy.create_handler(config)
+
+        mock_fetch.assert_called_once_with("https://global-cluster.example.com:19530", "mytoken")
+        mock_handler_cls.assert_called_once_with(
+            uri="https://primary:19530",
+            token="mytoken",
+            db_name="",
+            secure=True,
+        )
+        assert strategy.get_topology() is sample_topology
+        assert handler is mock_handler_cls.return_value
+        mock_refresher.start.assert_called_once()
+
+    @patch("pymilvus.client.connection_manager.TopologyRefresher")
+    @patch("pymilvus.client.grpc_handler.GrpcHandler")
+    @patch("pymilvus.client.connection_manager.fetch_topology")
+    def test_close_stops_refresher(
+        self, mock_fetch, mock_handler_cls, mock_refresher_cls, sample_topology
+    ):
+        """Test close stops the topology refresher."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        mock_fetch.return_value = sample_topology
+        mock_handler = _make_sync_handler()
+        mock_handler_cls.return_value = mock_handler
+        mock_refresher = Mock()
+        mock_refresher_cls.return_value = mock_refresher
+
+        strategy = GlobalStrategy()
+        handler = strategy.create_handler(config)
+        managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+        strategy.close(managed)
+
+        mock_refresher.stop.assert_called_once()
+        mock_handler.close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "old_endpoint,new_endpoint,expected_recovery",
+        [
+            ("https://old-primary:19530", "https://new-primary:19530", True),
+            ("https://same-primary:19530", "https://same-primary:19530", False),
+        ],
+    )
+    def test_on_unavailable_topology_refresh(self, old_endpoint, new_endpoint, expected_recovery):
+        """Test on_unavailable refreshes topology and returns recovery status."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+
+        old_topology = _make_topology(1, "c1", old_endpoint, capability=0b11)
+        new_topology = _make_topology(2, "c2", new_endpoint, capability=0b11)
+
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.grpc_handler.GrpcHandler"
+        ), patch("pymilvus.client.connection_manager.TopologyRefresher"):
+            mock_fetch.side_effect = [old_topology, new_topology]
+            strategy = GlobalStrategy()
+            handler = strategy.create_handler(config)
+            managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+            result = strategy.on_unavailable(managed)
+
+            assert result is expected_recovery
+            assert strategy.get_topology() is new_topology
+
+    def test_on_topology_change_callback(self, sample_topology):
+        """Test _on_topology_change updates topology."""
+        mixin = _GlobalStrategyMixin()
+        assert mixin.get_topology() is None
+
+        mixin._on_topology_change(sample_topology)
+        assert mixin.get_topology() is sample_topology
+
+    def test_on_unavailable_no_config(self):
+        """Test on_unavailable returns True when _config is None."""
+        mixin = _GlobalStrategyMixin()
+        managed = Mock()
+        assert mixin.on_unavailable(managed) is True
+
+    def test_on_unavailable_fetch_fails(self, sample_topology):
+        """Test on_unavailable returns True when fetch_topology raises."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        strategy = GlobalStrategy()
+
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.grpc_handler.GrpcHandler"
+        ), patch("pymilvus.client.connection_manager.TopologyRefresher"):
+            mock_fetch.side_effect = [sample_topology, RuntimeError("network error")]
+            handler = strategy.create_handler(config)
+            managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+            result = strategy.on_unavailable(managed)
+            assert result is True
+
+
+# =============================================================================
+# TestConnectionManager
+# =============================================================================
+
+
+class TestConnectionManager:
+    """Tests for ConnectionManager."""
+
+    def test_singleton(self):
+        """Test singleton pattern."""
+        mgr1 = ConnectionManager.get_instance()
+        mgr2 = ConnectionManager.get_instance()
+        assert mgr1 is mgr2
+
+    @pytest.mark.parametrize("dedicated", [False, True])
+    def test_get_or_create_modes(self, dedicated):
+        """Test shared vs dedicated connection modes."""
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+        mgr = ConnectionManager.get_instance()
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [_make_sync_handler(), _make_sync_handler()]
+
+            h1 = mgr.get_or_create(config, dedicated=dedicated)
+            h2 = mgr.get_or_create(config, dedicated=dedicated)
+
+            if dedicated:
+                assert h1 is not h2
+                assert mock_handler_cls.call_count == 2
+            else:
+                assert h1 is h2
+                assert mock_handler_cls.call_count == 1
+
+    def test_release_removes_client_reference(self, mock_grpc_handler):
+        """Test release removes client from managed connection."""
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+        mgr = ConnectionManager.get_instance()
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler", return_value=mock_grpc_handler):
+            client = Mock()
+            handler = mgr.get_or_create(config, client=client)
+
+            managed = mgr._get_managed(handler)
+            assert client in managed.clients
+
+            mgr.release(handler, client=client)
+            assert client not in managed.clients
+
+    def test_close_all(self):
+        """Test close_all closes all connections."""
+        mgr = ConnectionManager.get_instance()
+        configs = [
+            ConnectionConfig.from_uri("http://host1:19530", token="t1"),
+            ConnectionConfig.from_uri("http://host2:19530", token="t2"),
+        ]
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handlers = [_make_sync_handler(), _make_sync_handler()]
+            mock_handler_cls.side_effect = handlers
+
+            for config in configs:
+                mgr.get_or_create(config)
+
+            mgr.close_all()
+
+            for h in handlers:
+                h.close.assert_called_once()
+            assert len(mgr._registry) == 0
+
+    def test_get_stats(self, mock_grpc_handler):
+        """Test get_stats returns pool statistics."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler", return_value=mock_grpc_handler):
+            mgr.get_or_create(config)
+
+            stats = mgr.get_stats()
+            assert stats["total_connections"] == 1
+            assert stats["shared_connections"] == 1
+            assert stats["dedicated_connections"] == 0
+
+    def test_uses_global_strategy_for_global_endpoint(self, sample_topology, mock_grpc_handler):
+        """Test GlobalStrategy is used for global-cluster URIs."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("https://global-cluster.example.com:19530", token="test")
+
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.grpc_handler.GrpcHandler"
+        ) as mock_handler_cls, patch("pymilvus.client.connection_manager.TopologyRefresher"):
+            mock_fetch.return_value = sample_topology
+            mock_handler_cls.return_value = mock_grpc_handler
+            mgr.get_or_create(config)
+
+            mock_fetch.assert_called_once()
+            assert mock_handler_cls.call_args.kwargs["uri"] == "https://primary:19530"
+
+    def test_stats_include_dedicated_connections(self):
+        """Test that get_stats includes details for dedicated connections."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [_make_sync_handler(), _make_sync_handler()]
+
+            mgr.get_or_create(config)
+            mgr.get_or_create(config, dedicated=True)
+
+            stats = mgr.get_stats()
+            assert stats["total_connections"] == 2
+            assert stats["shared_connections"] == 1
+            assert stats["dedicated_connections"] == 1
+            assert len(stats["connections"]) == 2
+
+            shared = [c for c in stats["connections"] if not c["dedicated"]]
+            dedicated = [c for c in stats["connections"] if c["dedicated"]]
+            assert len(shared) == 1
+            assert len(dedicated) == 1
+            assert dedicated[0]["address"] == "localhost:19530"
+
+    def test_unknown_handler_returns_none(self):
+        """Test _get_managed returns None when handler is not in any registry."""
+        mgr = ConnectionManager.get_instance()
+        unknown_handler = Mock()
+        assert mgr._get_managed(unknown_handler) is None
+
+    def test_health_check_triggers_on_idle_connection(self):
+        """Test that an idle shared connection triggers health check and in-place recovery."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            h1 = mgr.get_or_create(config)
+            assert h1 is handler
+
+            # Artificially make the connection idle beyond the threshold
+            managed = mgr._get_managed(h1)
+            managed.last_used_at = time.time() - IDLE_THRESHOLD_SECONDS - 1
+
+            with patch.object(mgr, "_check_health", return_value=False):
+                h2 = mgr.get_or_create(config)
+
+            # In-place recovery: same handler object, reconnected
+            assert h2 is handler
+            assert managed.handler is handler
+            handler.reconnect.assert_called_once()
+
+    def test_no_health_check_when_recently_used(self):
+        """Test that a recently-used connection skips health check."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler()
+
+            mgr.get_or_create(config)
+
+            with patch.object(mgr, "_check_health") as mock_check:
+                mgr.get_or_create(config)
+                mock_check.assert_not_called()
+
+    def test_check_health_healthy_connection(self):
+        """Test _check_health returns True for healthy connection."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "READY"
+        channel.check_connectivity_state.return_value = state
+        handler._channel = channel
+        handler.get_server_version = Mock(return_value="v2.0")
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=RegularStrategy())
+        assert mgr._check_health(managed) is True
+
+    def test_check_health_no_channel(self):
+        """Test _check_health returns False when no channel."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock(spec=[])  # no _channel attribute
+        managed = ManagedConnection(handler=handler, config=config, strategy=RegularStrategy())
+        assert mgr._check_health(managed) is False
+
+    def test_check_health_shutdown_channel(self):
+        """Test _check_health returns False when channel is SHUTDOWN."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "SHUTDOWN"
+        channel.check_connectivity_state.return_value = state
+        handler._channel = channel
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=RegularStrategy())
+        assert mgr._check_health(managed) is False
+
+    def test_check_health_probe_exception(self):
+        """Test _check_health returns False when get_server_version raises."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "READY"
+        channel.check_connectivity_state.return_value = state
+        handler._channel = channel
+        handler.get_server_version = Mock(side_effect=Exception("timeout"))
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=RegularStrategy())
+        assert mgr._check_health(managed) is False
+
+    def test_recover_raises_on_failure(self):
+        """Test _recover logs and re-raises when reconnect fails."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            old_handler = _make_sync_handler()
+            mock_handler_cls.return_value = old_handler
+
+            handler = mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            handler.reconnect.side_effect = RuntimeError("cannot connect")
+
+            with pytest.raises(RuntimeError, match="cannot connect"):
+                mgr._recover(managed)
+
+    def test_handle_error_non_rpc_error_ignored(self):
+        """Test handle_error ignores non-RpcError/non-MilvusException errors."""
+        mgr = ConnectionManager.get_instance()
+        handler = Mock()
+        assert mgr.handle_error(handler, ValueError("some error")) is False
+
+    def test_handle_error_managed_not_found(self):
+        """Test handle_error returns when handler not in registry."""
+        mgr = ConnectionManager.get_instance()
+        handler = Mock()
+        # Handler not registered - should not raise
+        mgr.handle_error(handler, _MockRpcError())
+
+    def test_handle_error_already_recovered(self):
+        """Test handle_error skips recovery if another thread already recovered."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler()
+
+            handler = mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            # Simulate another thread recovering between lock release and re-acquire
+            # by bumping recovery_gen during on_unavailable
+            original_on_unavailable = managed.strategy.on_unavailable
+
+            def bump_gen_then_return_true(m):
+                original_on_unavailable(m)
+                managed.recovery_gen += 1  # simulate concurrent recovery
+                return True
+
+            managed.strategy.on_unavailable = bump_gen_then_return_true
+
+            mgr.handle_error(handler, _MockRpcError())
+
+            # reconnect should NOT have been called - concurrent recovery detected
+            handler.reconnect.assert_not_called()
+
+    def test_dedicated_connection_findable_after_recovery(self):
+        """Test that after in-place recovery, dedicated connection is still findable."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            conn = mgr.get_or_create(config, dedicated=True)
+            assert id(conn) in mgr._dedicated
+
+            mgr.handle_error(handler, _MockRpcError())
+
+            # Handler identity is preserved — same key, same object
+            assert id(handler) in mgr._dedicated
+            assert mgr._get_managed(handler) is not None
+            assert mgr._get_managed(handler).handler is handler
+            handler.reconnect.assert_called_once()
+
+    def test_dedicated_connection_releasable_after_recovery(self):
+        """Test that a recovered dedicated connection can be released."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config, dedicated=True)
+
+            mgr.handle_error(handler, _MockRpcError())
+
+            managed = mgr._get_managed(handler)
+            assert managed is not None
+
+            mgr.release(handler)
+            assert id(handler) not in mgr._dedicated
+
+    def test_managed_connection_creation_and_timestamps(self):
+        """Test ManagedConnection creation and timestamp tracking."""
+        config = ConnectionConfig.from_uri("http://localhost:19530")
+        managed = ManagedConnection(handler=Mock(), config=config, strategy=Mock())
+
+        assert managed.created_at > 0
+        assert managed.last_used_at > 0
+
+        # Test touch updates last_used_at
+        original = managed.last_used_at
+        time.sleep(0.01)
+        managed.touch()
+        assert managed.last_used_at > original
+
+        # Test idle_time
+        time.sleep(0.02)
+        assert managed.idle_time >= 0.02
+
+    def test_managed_connection_client_tracking(self):
+        """Test WeakSet client tracking."""
+        config = ConnectionConfig.from_uri("http://localhost:19530")
+        managed = ManagedConnection(handler=Mock(), config=config, strategy=Mock())
+
+        class FakeClient:
+            pass
+
+        assert managed.has_clients is False
+
+        client1, client2 = FakeClient(), FakeClient()
+        managed.add_client(client1)
+        managed.add_client(client2)
+        assert len(managed.clients) == 2
+        assert managed.has_clients is True
+
+        # WeakSet releases when client deleted
+        del client1
+        assert len(managed.clients) == 1
+
+        # Explicit removal
+        managed.remove_client(client2)
+        assert managed.has_clients is False
+
+
+# =============================================================================
+# TestAsyncGlobalStrategy
+# =============================================================================
+
+
+class TestAsyncGlobalStrategy:
+    """Tests for AsyncGlobalStrategy."""
+
+    @patch("pymilvus.client.connection_manager.TopologyRefresher")
+    @patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler")
+    @patch("pymilvus.client.connection_manager.fetch_topology")
+    def test_create_handler_fetches_topology_and_starts_refresher(
+        self, mock_fetch, mock_handler_cls, mock_refresher_cls, sample_topology
+    ):
+        """Test async handler creation fetches topology and starts refresher."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        mock_fetch.return_value = sample_topology
+        mock_refresher = Mock()
+        mock_refresher_cls.return_value = mock_refresher
+        mock_handler_cls.return_value = Mock()
+
+        strategy = AsyncGlobalStrategy()
+        handler = strategy.create_handler(config)
+
+        mock_fetch.assert_called_once()
+        mock_handler_cls.assert_called_once_with(
+            uri="https://primary:19530",
+            token="mytoken",
+            db_name="",
+            secure=True,
+        )
+        mock_refresher.start.assert_called_once()
+        assert handler is mock_handler_cls.return_value
+
+    @pytest.mark.asyncio
+    async def test_close_async_stops_refresher(self, sample_topology):
+        """Test close_async stops refresher and closes handler."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.async_grpc_handler.AsyncGrpcHandler"
+        ) as mock_handler_cls, patch(
+            "pymilvus.client.connection_manager.TopologyRefresher"
+        ) as mock_refresher_cls:
+            mock_fetch.return_value = sample_topology
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+            mock_refresher = Mock()
+            mock_refresher_cls.return_value = mock_refresher
+
+            strategy = AsyncGlobalStrategy()
+            handler = strategy.create_handler(config)
+            managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+            await strategy.close_async(managed)
+
+            mock_refresher.stop.assert_called_once()
+            mock_handler.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_with_running_loop(self, sample_topology):
+        """Test sync close stops refresher and creates fire-and-forget task."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.async_grpc_handler.AsyncGrpcHandler"
+        ) as mock_handler_cls, patch(
+            "pymilvus.client.connection_manager.TopologyRefresher"
+        ) as mock_refresher_cls:
+            mock_fetch.return_value = sample_topology
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+            mock_refresher = Mock()
+            mock_refresher_cls.return_value = mock_refresher
+
+            strategy = AsyncGlobalStrategy()
+            handler = strategy.create_handler(config)
+            managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+            strategy.close(managed)
+            await asyncio.sleep(0)
+
+            mock_refresher.stop.assert_called_once()
+            mock_handler.close.assert_awaited_once()
+
+    def test_close_without_running_loop(self, sample_topology):
+        """Test sync close falls back to asyncio.run when no loop is running."""
+        config = ConnectionConfig.from_uri(
+            "https://global-cluster.example.com:19530", token="mytoken"
+        )
+        close_called = []
+
+        async def mock_close():
+            close_called.append(True)
+
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.async_grpc_handler.AsyncGrpcHandler"
+        ) as mock_handler_cls, patch(
+            "pymilvus.client.connection_manager.TopologyRefresher"
+        ) as mock_refresher_cls:
+            mock_fetch.return_value = sample_topology
+            mock_handler_cls.return_value = _make_async_handler(close=mock_close)
+            mock_refresher = Mock()
+            mock_refresher_cls.return_value = mock_refresher
+
+            strategy = AsyncGlobalStrategy()
+            handler = strategy.create_handler(config)
+            managed = ManagedConnection(handler=handler, config=config, strategy=strategy)
+
+            strategy.close(managed)
+
+            mock_refresher.stop.assert_called_once()
+            assert len(close_called) == 1
+
+
+# =============================================================================
+# TestAsyncConnectionManager
+# =============================================================================
+
+
+class TestAsyncConnectionManager:
+    """Tests for AsyncConnectionManager."""
+
+    @pytest.mark.asyncio
+    async def test_singleton(self):
+        """Test singleton pattern."""
+        mgr1 = AsyncConnectionManager.get_instance()
+        mgr2 = AsyncConnectionManager.get_instance()
+        assert mgr1 is mgr2
+
+    def test_get_instance_without_running_loop(self):
+        """Test get_instance uses loop_id=0 when no event loop running."""
+        mgr = AsyncConnectionManager.get_instance()
+        assert mgr is not None
+        assert 0 in AsyncConnectionManager._instances
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dedicated", [False, True])
+    async def test_get_or_create_modes(self, mock_async_handler, dedicated):
+        """Test shared vs dedicated connection modes."""
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+        mgr = AsyncConnectionManager.get_instance()
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [_make_async_handler(), _make_async_handler()]
+
+            h1 = await mgr.get_or_create(config, dedicated=dedicated)
+            h2 = await mgr.get_or_create(config, dedicated=dedicated)
+
+            if dedicated:
+                assert h1 is not h2
+            else:
+                assert h1 is h2
+
+    @pytest.mark.asyncio
+    async def test_release(self, mock_async_handler):
+        """Test release removes client reference."""
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+        mgr = AsyncConnectionManager.get_instance()
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.AsyncGrpcHandler", return_value=mock_async_handler
+        ):
+            client = Mock()
+            handler = await mgr.get_or_create(config, client=client)
+
+            managed = mgr._get_managed(handler)
+            assert client in managed.clients
+
+            await mgr.release(handler, client=client)
+            assert client not in managed.clients
+
+    @pytest.mark.asyncio
+    async def test_get_or_create_adds_client_to_existing(self):
+        """Test that get_or_create adds client ref to existing shared connection."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            client1 = Mock()
+            client2 = Mock()
+
+            await mgr.get_or_create(config, client=client1)
+            await mgr.get_or_create(config, client=client2)
+
+            managed = mgr._get_managed(handler)
+            assert client1 in managed.clients
+            assert client2 in managed.clients
+
+    @pytest.mark.asyncio
+    async def test_create_dedicated_with_client(self):
+        """Test _create_dedicated stores client reference."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            client = Mock()
+            h = await mgr.get_or_create(config, dedicated=True, client=client)
+
+            managed = mgr._get_managed(h)
+            assert client in managed.clients
+
+    @pytest.mark.asyncio
+    async def test_get_strategy_returns_async_global(self):
+        """Test _get_strategy returns AsyncGlobalStrategy for global endpoint."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("https://global-cluster.example.com:19530", token="test")
+        strategy = mgr._get_strategy(config)
+        assert isinstance(strategy, AsyncGlobalStrategy)
+
+    @pytest.mark.asyncio
+    async def test_get_managed_returns_none_unknown_handler(self):
+        """Test _get_managed returns None for unknown handler."""
+        mgr = AsyncConnectionManager.get_instance()
+        unknown_handler = Mock()
+        assert mgr._get_managed(unknown_handler) is None
+
+    @pytest.mark.asyncio
+    async def test_error_callback_routes_to_handle_error(self):
+        """Test that async _on_rpc_error callback calls handle_error."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = await mgr.get_or_create(config)
+
+            with patch.object(mgr, "handle_error", new_callable=AsyncMock) as mock_handle:
+                error = Mock(spec=grpc.RpcError)
+                await handler._on_rpc_error(error)
+                mock_handle.assert_called_once_with(handler, error)
+
+    @pytest.mark.asyncio
+    async def test_async_health_check_triggers_on_idle_connection(self):
+        """Test that an idle async shared connection triggers health check and in-place recovery."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            h1 = await mgr.get_or_create(config)
+            assert h1 is handler
+
+            managed = mgr._get_managed(h1)
+            managed.last_used_at = time.time() - IDLE_THRESHOLD_SECONDS - 1
+
+            async def _failing_health_check(m):
+                return False
+
+            mgr._check_health = _failing_health_check
+            h2 = await mgr.get_or_create(config)
+
+            # In-place recovery: same handler object, reconnected
+            assert h2 is handler
+            assert managed.handler is handler
+            handler.reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_check_health_healthy(self):
+        """Test _check_health returns True for healthy async connection."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "READY"
+        channel.get_state.return_value = state
+        handler._async_channel = channel
+        handler.get_server_version = AsyncMock(return_value="v2.0")
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=AsyncRegularStrategy())
+        assert await mgr._check_health(managed) is True
+
+    @pytest.mark.asyncio
+    async def test_async_check_health_no_channel(self):
+        """Test _check_health returns False when no channel."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock(spec=[])
+        managed = ManagedConnection(handler=handler, config=config, strategy=AsyncRegularStrategy())
+        assert await mgr._check_health(managed) is False
+
+    @pytest.mark.asyncio
+    async def test_async_check_health_shutdown_channel(self):
+        """Test _check_health returns False when channel is SHUTDOWN."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "SHUTDOWN"
+        channel.get_state.return_value = state
+        handler._async_channel = channel
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=AsyncRegularStrategy())
+        assert await mgr._check_health(managed) is False
+
+    @pytest.mark.asyncio
+    async def test_async_check_health_probe_exception(self):
+        """Test _check_health returns False when get_server_version raises."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        handler = Mock()
+        channel = Mock()
+        state = Mock()
+        state.name = "READY"
+        channel.get_state.return_value = state
+        handler._async_channel = channel
+        handler.get_server_version = AsyncMock(side_effect=Exception("timeout"))
+
+        managed = ManagedConnection(handler=handler, config=config, strategy=AsyncRegularStrategy())
+        assert await mgr._check_health(managed) is False
+
+    @pytest.mark.asyncio
+    async def test_release_closes_dedicated(self):
+        """Test that releasing a dedicated async connection closes it."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            h = await mgr.get_or_create(config, dedicated=True)
+            assert id(h) in mgr._dedicated
+
+            await mgr.release(h)
+            assert id(h) not in mgr._dedicated
+            handler.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_error_non_rpc_error_ignored(self):
+        """Test async handle_error ignores non-RpcError/non-MilvusException errors."""
+        mgr = AsyncConnectionManager.get_instance()
+        handler = Mock()
+        assert await mgr.handle_error(handler, ValueError("some error")) is False
+
+    @pytest.mark.asyncio
+    async def test_handle_error_non_unavailable_ignored(self):
+        """Test async handle_error ignores non-UNAVAILABLE RPC errors."""
+        mgr = AsyncConnectionManager.get_instance()
+        handler = Mock()
+        assert await mgr.handle_error(handler, _NotFoundRpcError()) is False
+
+    @pytest.mark.asyncio
+    async def test_handle_error_managed_not_found(self):
+        """Test async handle_error returns when handler not in registry."""
+        mgr = AsyncConnectionManager.get_instance()
+        handler = Mock()
+        # Handler not registered - should not raise
+        await mgr.handle_error(handler, _MockRpcError())
+
+    @pytest.mark.asyncio
+    async def test_recover_raises_on_failure(self):
+        """Test async _recover logs and re-raises when reconnect fails."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            handler.reconnect = AsyncMock(side_effect=RuntimeError("cannot connect"))
+
+            with pytest.raises(RuntimeError, match="cannot connect"):
+                await mgr._recover(managed)
+
+    @pytest.mark.asyncio
+    async def test_close_all_closes_shared_and_dedicated(self):
+        """Test close_all closes both shared and dedicated async connections."""
+        mgr = AsyncConnectionManager.get_instance()
+        config1 = ConnectionConfig.from_uri("http://host1:19530", token="t1")
+        config2 = ConnectionConfig.from_uri("http://host2:19530", token="t2")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handlers = [_make_async_handler() for _ in range(3)]
+            mock_handler_cls.side_effect = handlers
+
+            await mgr.get_or_create(config1)
+            await mgr.get_or_create(config2)
+            await mgr.get_or_create(config1, dedicated=True)
+
+            assert len(mgr._registry) == 2
+            assert len(mgr._dedicated) == 1
+
+            await mgr.close_all()
+
+            assert len(mgr._registry) == 0
+            assert len(mgr._dedicated) == 0
+            for h in handlers:
+                h.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_all_handles_errors(self):
+        """Test close_all continues despite close errors on both shared and dedicated."""
+        mgr = AsyncConnectionManager.get_instance()
+        config1 = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+        config2 = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [
+                _make_async_handler(close=AsyncMock(side_effect=RuntimeError("close failed"))),
+                _make_async_handler(close=AsyncMock(side_effect=RuntimeError("close failed"))),
+            ]
+
+            await mgr.get_or_create(config1)
+            await mgr.get_or_create(config2, dedicated=True)
+
+            assert len(mgr._registry) == 1
+            assert len(mgr._dedicated) == 1
+
+            await mgr.close_all()
+            assert len(mgr._registry) == 0
+            assert len(mgr._dedicated) == 0
+
+    @pytest.mark.asyncio
+    async def test_async_dedicated_connection_findable_after_recovery(self):
+        """Test async dedicated connection still findable after in-place recovery."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config, dedicated=True)
+            assert id(handler) in mgr._dedicated
+
+            await mgr.handle_error(handler, _MockRpcError())
+
+            # Handler identity preserved — same key, same object
+            assert id(handler) in mgr._dedicated
+            assert mgr._get_managed(handler).handler is handler
+            handler.reconnect.assert_called_once()
+
+
+# =============================================================================
+# TestErrorHandling
+# =============================================================================
+
+
+class TestErrorHandling:
+    """Tests for error handling and recovery."""
+
+    @pytest.mark.parametrize(
+        "error_code,expect_recovery",
+        [
+            (grpc.StatusCode.UNAVAILABLE, True),
+            (grpc.StatusCode.INVALID_ARGUMENT, False),
+            (grpc.StatusCode.NOT_FOUND, False),
+        ],
+    )
+    def test_handle_error(self, error_code, expect_recovery):
+        """Test error handling triggers recovery only for UNAVAILABLE."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+
+            class _CodedRpcError(grpc.RpcError):
+                def code(self):
+                    return error_code
+
+            mgr.handle_error(handler, _CodedRpcError())
+
+            if expect_recovery:
+                mock_handler.reconnect.assert_called_once()
+            else:
+                mock_handler.reconnect.assert_not_called()
+
+    def test_error_callback_registered_on_handler(self):
+        """Test that _on_rpc_error callback is set on handler after creation."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = Mock(spec=[])  # no spec attrs, so _on_rpc_error must be set
+            mock_handler._wait_for_channel_ready = Mock()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+
+            assert hasattr(handler, "_on_rpc_error")
+            assert callable(handler._on_rpc_error)
+
+    def test_error_callback_routes_to_handle_error(self):
+        """Test that _on_rpc_error callback calls handle_error on the manager."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = Mock(spec=[])
+            mock_handler._wait_for_channel_ready = Mock()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+
+            with patch.object(mgr, "handle_error") as mock_handle:
+                error = Mock(spec=grpc.RpcError)
+                handler._on_rpc_error(error)
+                mock_handle.assert_called_once_with(handler, error)
+
+    def test_error_callback_preserved_after_recovery(self):
+        """Test that _on_rpc_error callback remains valid after in-place recovery."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            original_callback = handler._on_rpc_error
+
+            mgr.handle_error(handler, _MockRpcError())
+
+            # Same handler, same callback (no re-registration needed)
+            managed = next(iter(mgr._registry.values()))
+            assert managed.handler is handler
+            assert managed.handler._on_rpc_error is original_callback
+
+    @pytest.mark.asyncio
+    async def test_async_error_callback_registered(self):
+        """Test that _on_rpc_error callback is set on async handler after creation."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = await mgr.get_or_create(config)
+
+            assert hasattr(handler, "_on_rpc_error")
+            assert callable(handler._on_rpc_error)
+
+    @pytest.mark.asyncio
+    async def test_async_error_callback_is_async(self):
+        """Test that _on_rpc_error callback is awaitable (async)."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = await mgr.get_or_create(config)
+
+            assert asyncio.iscoroutinefunction(handler._on_rpc_error)
+
+    @pytest.mark.asyncio
+    async def test_async_handle_error_unavailable(self):
+        """Test async handle_error triggers in-place recovery for UNAVAILABLE."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config)
+
+            await mgr.handle_error(handler, _MockRpcError())
+
+            managed = next(iter(mgr._registry.values()))
+            # Handler identity preserved — in-place recovery
+            assert managed.handler is handler
+            handler.reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_recover_calls_reconnect(self):
+        """Test that async _recover calls reconnect on the existing handler."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config)
+
+            await mgr.handle_error(handler, _MockRpcError())
+
+            handler.reconnect.assert_called_once()
+
+
+# =============================================================================
+# TestMilvusClientIntegration
+# =============================================================================
+
+
+class TestMilvusClientIntegration:
+    """Integration tests for MilvusClient with ConnectionManager."""
+
+    def test_uses_connection_manager(self, mock_grpc_handler):
+        """Test MilvusClient uses ConnectionManager."""
+        with patch.object(ConnectionManager, "get_instance") as mock_get_instance:
+            mock_manager = Mock()
+            mock_manager.get_or_create.return_value = mock_grpc_handler
+            mock_get_instance.return_value = mock_manager
+
+            client = MilvusClient(uri="http://localhost:19530")
+
+            mock_manager.get_or_create.assert_called_once()
+            config = mock_manager.get_or_create.call_args.args[0]
+            assert config.address == "localhost:19530"
+
+            client.close()
+            mock_manager.release.assert_called_once_with(mock_grpc_handler, client=client)
+
+    @pytest.mark.parametrize(
+        "scenario,uri1,token1,uri2,token2,expect_same_handler",
+        [
+            (
+                "same_config",
+                "http://localhost:19530",
+                "test",
+                "http://localhost:19530",
+                "test",
+                True,
+            ),
+            (
+                "different_tokens",
+                "http://localhost:19530",
+                "token1",
+                "http://localhost:19530",
+                "token2",
+                False,
+            ),
+        ],
+    )
+    def test_connection_sharing(self, scenario, uri1, token1, uri2, token2, expect_same_handler):
+        """Test connection sharing behavior based on config."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [
+                _make_sync_handler(get_server_type=Mock(return_value="milvus")),
+                _make_sync_handler(get_server_type=Mock(return_value="milvus")),
+            ]
+
+            client1 = MilvusClient(uri=uri1, token=token1)
+            client2 = MilvusClient(uri=uri2, token=token2)
+
+            if expect_same_handler:
+                assert client1._handler is client2._handler
+                assert mock_handler_cls.call_count == 1
+            else:
+                assert client1._handler is not client2._handler
+                assert mock_handler_cls.call_count == 2
+
+            client1.close()
+            client2.close()
+
+    def test_dedicated_mode(self):
+        """Test dedicated mode creates separate connections."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.side_effect = [
+                _make_sync_handler(get_server_type=Mock(return_value="milvus")),
+                _make_sync_handler(get_server_type=Mock(return_value="milvus")),
+            ]
+
+            client1 = MilvusClient(uri="http://localhost:19530", token="test", dedicated=True)
+            client2 = MilvusClient(uri="http://localhost:19530", token="test", dedicated=True)
+
+            assert client1._handler is not client2._handler
+
+            client1.close()
+            client2.close()
+
+    def test_global_endpoint_uses_global_strategy(self, sample_topology):
+        """Test global cluster URIs use GlobalStrategy."""
+        with patch("pymilvus.client.connection_manager.fetch_topology") as mock_fetch, patch(
+            "pymilvus.client.grpc_handler.GrpcHandler"
+        ) as mock_handler_cls, patch("pymilvus.client.connection_manager.TopologyRefresher"):
+            mock_fetch.return_value = sample_topology
+            mock_handler_cls.return_value = _make_sync_handler(
+                get_server_type=Mock(return_value="zilliz")
+            )
+            client = MilvusClient(uri="https://global-cluster.zilliz.com:19530", token="test")
+
+            mock_fetch.assert_called_once()
+            assert mock_handler_cls.call_args.kwargs["uri"] == "https://primary:19530"
+
+            client.close()
+
+    def test_stats_reflect_connections(self):
+        """Test get_stats returns accurate pool information."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+
+            mgr = ConnectionManager.get_instance()
+            assert mgr.get_stats()["total_connections"] == 0
+
+            client = MilvusClient(uri="http://localhost:19530", token="test")
+
+            stats = mgr.get_stats()
+            assert stats["total_connections"] == 1
+            assert stats["shared_connections"] == 1
+
+            client.close()
+
+    def test_sync_client_double_close_is_safe(self):
+        """Test that calling close() twice on MilvusClient doesn't raise."""
+        with patch.object(ConnectionManager, "get_instance") as mock_get_instance:
+            mock_manager = Mock()
+            mock_handler = Mock()
+            mock_handler.get_server_type = Mock(return_value="milvus")
+            mock_manager.get_or_create.return_value = mock_handler
+            mock_get_instance.return_value = mock_manager
+
+            client = MilvusClient(uri="http://localhost:19530")
+            client.close()
+            client.close()  # Should not raise
+
+            mock_manager.release.assert_called_once()
+
+
+# =============================================================================
+# TestReplicateViolationRecovery
+# =============================================================================
+
+
+class TestReplicateViolationRecovery:
+    """Tests for STREAMING_CODE_REPLICATE_VIOLATION handling."""
+
+    def _make_replicate_error(self):
+        return MilvusException(
+            code=65535,
+            message="code: STREAMING_CODE_REPLICATE_VIOLATION, "
+            "cause: non-replicate message cannot be received in secondary role",
+        )
+
+    def test_replicate_violation_triggers_recovery_for_global_strategy(self):
+        """Test handle_error triggers recovery on REPLICATE_VIOLATION for global connections."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri(
+            "https://glo-xxx.global-cluster.vectordb.zilliz.com", token="test"
+        )
+
+        mock_topology = _make_topology(1, "in01", "https://in01.zilliz.com")
+        new_topology = _make_topology(2, "in02", "https://in02.zilliz.com")
+
+        with patch(
+            "pymilvus.client.connection_manager.fetch_topology", return_value=mock_topology
+        ), patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+            assert isinstance(managed.strategy, GlobalStrategy)
+
+            with patch(
+                "pymilvus.client.connection_manager.fetch_topology",
+                return_value=new_topology,
+            ):
+                result = mgr.handle_error(handler, self._make_replicate_error())
+
+            assert result is True
+            # In-place recovery: reconnect called with new primary address
+            handler.reconnect.assert_called_once()
+            call_kwargs = handler.reconnect.call_args
+            assert call_kwargs.kwargs.get("address") == "in02.zilliz.com:19530"
+
+    def test_replicate_violation_ignored_for_regular_strategy(self):
+        """Test handle_error returns True for REPLICATE_VIOLATION on regular connections
+        (RegularStrategy.on_unavailable always returns True)."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+            assert isinstance(managed.strategy, RegularStrategy)
+
+            result = mgr.handle_error(handler, self._make_replicate_error())
+            assert result is True
+            handler.reconnect.assert_called_once()
+
+    def test_unrelated_milvus_exception_not_retried(self):
+        """Test handle_error ignores MilvusExceptions without REPLICATE_VIOLATION."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+
+            error = MilvusException(code=1, message="collection not found")
+            result = mgr.handle_error(handler, error)
+            assert result is False
+
+    def test_replicate_violation_no_recovery_when_primary_unchanged(self):
+        """Test REPLICATE_VIOLATION returns False when global primary hasn't changed."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri(
+            "https://glo-xxx.global-cluster.vectordb.zilliz.com", token="test"
+        )
+
+        mock_topology = _make_topology(1, "in01", "https://in01.zilliz.com")
+
+        with patch(
+            "pymilvus.client.connection_manager.fetch_topology", return_value=mock_topology
+        ), patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = mgr.get_or_create(config)
+
+            with patch(
+                "pymilvus.client.connection_manager.fetch_topology",
+                return_value=mock_topology,
+            ):
+                result = mgr.handle_error(handler, self._make_replicate_error())
+
+            assert result is False
+            mock_handler.reconnect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_replicate_violation_triggers_recovery(self):
+        """Test async handle_error triggers recovery on REPLICATE_VIOLATION."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri(
+            "https://glo-xxx.global-cluster.vectordb.zilliz.com", token="test"
+        )
+
+        mock_topology = _make_topology(1, "in01", "https://in01.zilliz.com")
+        new_topology = _make_topology(2, "in02", "https://in02.zilliz.com")
+
+        with patch(
+            "pymilvus.client.connection_manager.fetch_topology", return_value=mock_topology
+        ), patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler()
+            mock_handler_cls.return_value = mock_handler
+
+            handler = await mgr.get_or_create(config)
+
+            with patch(
+                "pymilvus.client.connection_manager.fetch_topology",
+                return_value=new_topology,
+            ):
+                result = await mgr.handle_error(handler, self._make_replicate_error())
+
+            assert result is True
+            # In-place recovery: reconnect called with new primary address
+            handler.reconnect.assert_called_once()
+            call_kwargs = handler.reconnect.call_args
+            assert call_kwargs.kwargs.get("address") == "in02.zilliz.com:19530"
+
+    @pytest.mark.asyncio
+    async def test_async_unrelated_milvus_exception_not_retried(self):
+        """Test async handle_error ignores MilvusExceptions without REPLICATE_VIOLATION."""
+        mgr = AsyncConnectionManager.get_instance()
+        handler = Mock()
+
+        error = MilvusException(code=1, message="collection not found")
+        assert await mgr.handle_error(handler, error) is False
+
+
+# =============================================================================
+# TestInPlaceRecovery — regression tests for "Cannot invoke RPC on closed channel"
+# =============================================================================
+
+
+class TestInPlaceRecovery:
+    """Tests that recovery preserves handler identity.
+
+    Before the fix, _recover() created a new handler object. This caused
+    "Cannot invoke RPC on closed channel" because:
+    - MilvusClient._handler still referenced the old (closed) handler
+    - retry_on_rpc_failure loops still used the old handler via args[0]
+    """
+
+    def setup_method(self):
+        ConnectionManager._reset_instance()
+        AsyncConnectionManager._reset_instance()
+
+    def teardown_method(self):
+        ConnectionManager._reset_instance()
+        AsyncConnectionManager._reset_instance()
+
+    def test_recover_preserves_handler_identity(self):
+        """After recovery, managed.handler is the SAME object (not a new one)."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            conn = mgr.get_or_create(config)
+            assert conn is handler
+
+            mgr.handle_error(handler, _MockRpcError())
+
+            managed = mgr._get_managed(handler)
+            assert managed is not None
+            assert managed.handler is handler  # Same object — in-place recovery
+            handler.reconnect.assert_called_once()
+
+    def test_client_handler_reference_valid_after_recovery(self):
+        """MilvusClient._handler remains usable after UNAVAILABLE recovery."""
+        mgr = ConnectionManager.get_instance()
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = handler
+
+            client = MilvusClient(uri="http://localhost:19530")
+            original_handler = client._handler
+            assert original_handler is handler
+
+            # Simulate UNAVAILABLE error triggering recovery
+            mgr.handle_error(handler, _MockRpcError())
+
+            # Client's handler reference is STILL valid (same object)
+            assert client._handler is original_handler
+            assert client._get_connection() is original_handler
+            handler.reconnect.assert_called_once()
+
+            client.close()
+
+    def test_recovery_gen_incremented(self):
+        """recovery_gen counter increments on each recovery."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            assert managed.recovery_gen == 0
+            mgr.handle_error(handler, _MockRpcError())
+            assert managed.recovery_gen == 1
+            mgr.handle_error(handler, _MockRpcError())
+            assert managed.recovery_gen == 2
+
+    def test_global_recovery_passes_new_primary_address(self):
+        """Global strategy recovery passes the new primary endpoint to reconnect."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri(
+            "https://glo-xxx.global-cluster.vectordb.zilliz.com", token="test"
+        )
+
+        old_topology = _make_topology(1, "in01", "https://old-primary.zilliz.com:19530")
+        new_topology = _make_topology(2, "in02", "https://new-primary.zilliz.com:19530")
+
+        with patch(
+            "pymilvus.client.connection_manager.fetch_topology", return_value=old_topology
+        ), patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+
+            with patch(
+                "pymilvus.client.connection_manager.fetch_topology",
+                return_value=new_topology,
+            ):
+                mgr.handle_error(handler, _MockRpcError())
+
+            call_kwargs = handler.reconnect.call_args
+            assert call_kwargs.kwargs.get("address") == "new-primary.zilliz.com:19530"
+
+    def test_regular_recovery_keeps_same_address(self):
+        """Regular strategy recovery passes address=None (keep current)."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            mgr.handle_error(handler, _MockRpcError())
+
+            call_kwargs = handler.reconnect.call_args
+            assert call_kwargs.kwargs.get("address") is None
+
+    def test_recovery_reuses_initial_connection_timeout(self):
+        """Recovery should reuse the timeout configured when the connection was created."""
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("https://remote.example.com:443", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config, timeout=60)
+            mgr.handle_error(handler, _MockRpcError())
+
+            call_kwargs = handler.reconnect.call_args
+            assert call_kwargs.kwargs["timeout"] == 60
+
+    def test_global_recovery_warns_when_no_topology(self):
+        """GlobalStrategy logs warning when get_recovery_address returns None.
+
+        This happens when on_unavailable fails to fetch topology (e.g., network
+        error during refresh) but still returns True to trigger recovery.
+        """
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri(
+            "https://glo-xxx.global-cluster.vectordb.zilliz.com", token="test"
+        )
+
+        mock_topology = _make_topology(1, "in01", "https://in01.zilliz.com")
+
+        with patch(
+            "pymilvus.client.connection_manager.fetch_topology", return_value=mock_topology
+        ), patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            # Clear topology AND make fetch_topology fail — simulates
+            # on_unavailable returning True despite no topology available
+            managed.strategy._topology = None
+
+            with patch(
+                "pymilvus.client.connection_manager.fetch_topology",
+                side_effect=RuntimeError("network error"),
+            ), patch("pymilvus.client.connection_manager.logger") as mock_logger:
+                mgr.handle_error(handler, _MockRpcError())
+
+                # Should warn about missing topology
+                mock_logger.warning.assert_any_call(
+                    "Global strategy has no topology; reconnecting to current address"
+                )
+                # reconnect still called (with address=None, falls back to current)
+                handler.reconnect.assert_called_once()
+                assert handler.reconnect.call_args.kwargs.get("address") is None
+
+    @pytest.mark.asyncio
+    async def test_async_recover_preserves_handler_identity(self):
+        """Async: after recovery, managed.handler is the SAME object."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            conn = await mgr.get_or_create(config)
+            assert conn is handler
+
+            await mgr.handle_error(handler, _MockRpcError())
+
+            managed = mgr._get_managed(handler)
+            assert managed is not None
+            assert managed.handler is handler
+            handler.reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_recovery_gen_incremented(self):
+        """Async: recovery_gen increments on each recovery."""
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            assert managed.recovery_gen == 0
+            await mgr.handle_error(handler, _MockRpcError())
+            assert managed.recovery_gen == 1
+
+    def test_concurrent_handle_error_only_one_reconnect(self):
+        """Two threads hitting handle_error simultaneously: only one reconnects.
+
+        Thread A and B both get UNAVAILABLE. on_unavailable is called outside
+        the lock, so both can enter. But the recovery_gen guard ensures only
+        one actually calls reconnect.
+        """
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            # Barrier so both threads enter on_unavailable at the same time
+            barrier = threading.Barrier(2)
+
+            original_on_unavailable = managed.strategy.on_unavailable
+
+            def slow_on_unavailable(m):
+                barrier.wait(timeout=2)
+                return original_on_unavailable(m)
+
+            managed.strategy.on_unavailable = slow_on_unavailable
+
+            results = [None, None]
+
+            def call_handle_error(idx):
+                results[idx] = mgr.handle_error(handler, _MockRpcError())
+
+            t1 = threading.Thread(target=call_handle_error, args=(0,))
+            t2 = threading.Thread(target=call_handle_error, args=(1,))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+            # Both return True (recovery was handled)
+            assert results[0] is True
+            assert results[1] is True
+            # But reconnect called only once — the second thread saw the gen bump
+            assert handler.reconnect.call_count == 1
+            assert managed.recovery_gen == 1
+
+    def test_concurrent_handle_error_and_health_check_both_recover_safely(self):
+        """handle_error and get_or_create health-check both recover, serialized by lock.
+
+        Thread A triggers recovery via handle_error (under lock).
+        Thread B triggers health-check recovery via get_or_create (under lock).
+        Both reconnect (one from each path), but they don't corrupt each other
+        because self._lock serializes access. The handler object is preserved.
+        """
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+            # Make idle to trigger health check
+            managed.last_used_at = time.time() - IDLE_THRESHOLD_SECONDS - 1
+
+            barrier = threading.Barrier(2, timeout=3)
+
+            original_on_unavailable = managed.strategy.on_unavailable
+
+            def slow_on_unavailable(m):
+                barrier.wait()
+                return original_on_unavailable(m)
+
+            managed.strategy.on_unavailable = slow_on_unavailable
+
+            results = {}
+
+            def thread_handle_error():
+                results["handle_error"] = mgr.handle_error(handler, _MockRpcError())
+
+            def thread_get_or_create():
+                with patch.object(mgr, "_check_health", return_value=False):
+                    barrier.wait()
+                    results["get_or_create"] = mgr.get_or_create(config)
+
+            t1 = threading.Thread(target=thread_handle_error)
+            t2 = threading.Thread(target=thread_get_or_create)
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+            # Both completed without error
+            assert "handle_error" in results
+            assert "get_or_create" in results
+            # Both paths recover independently (serialized by lock):
+            # - handle_error path: gen guard lets it through
+            # - get_or_create health-check path: no gen guard, always recovers
+            # Either way, the handler object is the same.
+            assert managed.handler is handler
+
+    def test_recovery_gen_guard_deterministic(self):
+        """Directly verify: if gen was bumped during on_unavailable, reconnect is skipped.
+
+        This is a deterministic (non-threaded) test of the gen guard logic.
+        The concurrent variant (test_concurrent_handle_error_only_one_reconnect)
+        proves it works under real thread contention.
+        """
+        mgr = ConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            handler = _make_sync_handler()
+            mock_handler_cls.return_value = handler
+
+            mgr.get_or_create(config)
+            managed = mgr._get_managed(handler)
+
+            # Simulate: another thread recovers during on_unavailable
+            original_on_unavailable = managed.strategy.on_unavailable
+
+            def bump_gen_during_on_unavailable(m):
+                managed.recovery_gen += 1  # simulate concurrent recovery
+                return original_on_unavailable(m)
+
+            managed.strategy.on_unavailable = bump_gen_during_on_unavailable
+
+            result = mgr.handle_error(handler, _MockRpcError())
+
+            assert result is True
+            # reconnect should NOT have been called — gen was bumped
+            handler.reconnect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_sequential_handle_errors_both_recover(self):
+        """Async: two sequential handle_error calls both reconnect.
+
+        In the async path, saved_gen is read and checked within the same
+        lock acquisition (no release between read and check). So each
+        call independently recovers — this is correct behavior since
+        each UNAVAILABLE error indicates a real problem.
+        """
+        mgr = AsyncConnectionManager.get_instance()
+        config = ConnectionConfig.from_uri("http://localhost:19530", token="test")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            handler = _make_async_handler()
+            mock_handler_cls.return_value = handler
+
+            await mgr.get_or_create(config)
+
+            r1, r2 = await asyncio.gather(
+                mgr.handle_error(handler, _MockRpcError()),
+                mgr.handle_error(handler, _MockRpcError()),
+            )
+
+            assert r1 is True
+            assert r2 is True
+            # Both recover: the asyncio lock serializes them, but each
+            # reads saved_gen within its own lock scope, so both match.
+            assert handler.reconnect.call_count == 2
+            # Handler identity still preserved
+            managed = mgr._get_managed(handler)
+            assert managed is not None
+            assert managed.handler is handler
+
+
+# =============================================================================
+# TestHandlerReconnect — unit tests for reconnect() on real handler objects
+# =============================================================================
+
+
+def _make_real_sync_handler(address="localhost:19530"):
+    """Create a real GrpcHandler with mocked gRPC channel for reconnect testing."""
+    with patch("pymilvus.client.grpc_handler.grpc.insecure_channel") as mock_ch:
+        mock_ch.return_value = Mock()
+        return GrpcHandler(uri=f"http://{address}", address=address)
+
+
+def _make_real_async_handler(address="localhost:19530"):
+    """Create a real AsyncGrpcHandler with mocked gRPC channel for reconnect testing."""
+    with patch("pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel") as mock_ch:
+        channel = Mock()
+        channel._unary_unary_interceptors = []
+        channel.close = AsyncMock()
+        mock_ch.return_value = channel
+        return AsyncGrpcHandler(uri=f"http://{address}", address=address)
+
+
+class TestHandlerReconnect:
+    """Tests for GrpcHandler.reconnect() and AsyncGrpcHandler.reconnect().
+
+    Exercises the real reconnect() implementations (not mocked) to cover
+    the create-ready-switch-retire channel lifecycle.
+    """
+
+    @pytest.mark.parametrize(
+        "new_address,expected_address",
+        [
+            (None, "localhost:19530"),
+            ("newhost:19530", "newhost:19530"),
+        ],
+        ids=["keep_address", "change_address"],
+    )
+    def test_sync_reconnect_address_handling(self, new_address, expected_address):
+        """reconnect() keeps or updates address, creates a new channel, then retires old one."""
+        handler = _make_real_sync_handler()
+        old_channel = handler._channel
+
+        def wait_for_new_channel(**kwargs):
+            return kwargs["final_channel"], kwargs["stub"]
+
+        with patch("pymilvus.client.grpc_handler.grpc.insecure_channel") as mock_ch, patch.object(
+            handler, "_wait_for_channel_ready", side_effect=wait_for_new_channel
+        ):
+            new_channel = Mock()
+            mock_ch.return_value = new_channel
+            handler.reconnect(address=new_address)
+
+        old_channel.close.assert_not_called()
+        assert handler._channel is new_channel
+        assert handler._address == expected_address
+
+    def test_sync_reconnect_does_not_hard_close_retired_channel(self):
+        """Retired sync channels are not hard-closed during reconnect."""
+        handler = _make_real_sync_handler()
+        old_channel = handler._channel
+        old_channel.close = Mock(side_effect=RuntimeError("broken"))
+
+        def wait_for_new_channel(**kwargs):
+            return kwargs["final_channel"], kwargs["stub"]
+
+        with patch("pymilvus.client.grpc_handler.grpc.insecure_channel") as mock_ch, patch.object(
+            handler, "_wait_for_channel_ready", side_effect=wait_for_new_channel
+        ):
+            new_channel = Mock()
+            mock_ch.return_value = new_channel
+            handler.reconnect()
+
+        assert handler._channel is new_channel
+        old_channel.close.assert_not_called()
+
+    def test_sync_reconnect_passes_timeout(self):
+        """reconnect() forwards timeout to _wait_for_channel_ready."""
+        handler = _make_real_sync_handler()
+
+        with patch(
+            "pymilvus.client.grpc_handler.grpc.insecure_channel", return_value=Mock()
+        ), patch.object(handler, "_wait_for_channel_ready") as mock_wait:
+            mock_wait.side_effect = lambda **kwargs: (kwargs["final_channel"], kwargs["stub"])
+            handler.reconnect(timeout=30)
+
+        assert mock_wait.call_args.kwargs["timeout"] == 30
+        assert "channel" in mock_wait.call_args.kwargs
+        assert "stub" in mock_wait.call_args.kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "new_address,expected_address",
+        [
+            (None, "localhost:19530"),
+            ("newhost:19530", "newhost:19530"),
+        ],
+        ids=["keep_address", "change_address"],
+    )
+    async def test_async_reconnect_address_handling(self, new_address, expected_address):
+        """Async reconnect() keeps or updates address and gracefully retires the old channel."""
+        handler = _make_real_async_handler()
+        old_channel = handler._async_channel
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel"
+        ) as mock_ch, patch.object(
+            handler, "_setup_identifier_interceptor_for_channel", new_callable=AsyncMock
+        ) as mock_validate:
+            new_channel = Mock()
+            new_channel._unary_unary_interceptors = []
+            new_channel.close = AsyncMock()
+            mock_ch.return_value = new_channel
+            mock_validate.side_effect = lambda final_channel, stub, user, timeout=10: (
+                Mock(),
+                final_channel,
+                stub,
+            )
+            await handler.reconnect(address=new_address)
+            await asyncio.sleep(0)
+
+        old_channel.close.assert_awaited_once_with(grace=10)
+        assert handler._async_channel is new_channel
+        assert handler._address == expected_address
+        assert handler._is_channel_ready is True
+
+    @pytest.mark.asyncio
+    async def test_async_reconnect_validation_failure_keeps_current_channel(self):
+        """When async replacement validation fails, the current channel remains active."""
+        handler = _make_real_async_handler()
+        old_channel = handler._async_channel
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel"
+        ) as mock_ch, patch.object(
+            handler,
+            "_setup_identifier_interceptor_for_channel",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("cannot connect"),
+        ):
+            new_channel = Mock()
+            new_channel._unary_unary_interceptors = []
+            new_channel.close = AsyncMock()
+            mock_ch.return_value = new_channel
+            with pytest.raises(RuntimeError, match="cannot connect"):
+                await handler.reconnect()
+
+        new_channel.close.assert_awaited_once()
+        old_channel.close.assert_not_called()
+        assert handler._async_channel is old_channel
+
+    @pytest.mark.asyncio
+    async def test_async_reconnect_rpc_failure_raises_connect_failed(self):
+        """Async reconnect() maps Connect RPC failures to a clear MilvusException."""
+        handler = _make_real_async_handler()
+        old_channel = handler._async_channel
+        old_stub = handler._async_stub
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel"
+        ) as mock_ch, patch.object(
+            handler,
+            "_setup_identifier_interceptor_for_channel",
+            new_callable=AsyncMock,
+            side_effect=_MockRpcError(),
+        ):
+            new_channel = Mock()
+            new_channel._unary_unary_interceptors = []
+            new_channel.close = AsyncMock()
+            mock_ch.return_value = new_channel
+            with pytest.raises(
+                MilvusException,
+                match="Fail connecting to server on deadhost:19530",
+            ):
+                await handler.reconnect(address="deadhost:19530")
+
+        new_channel.close.assert_awaited_once()
+        old_channel.close.assert_not_called()
+        assert handler._async_channel is old_channel
+        assert handler._async_stub is old_stub
+        assert handler._address == "localhost:19530"
+
+    @pytest.mark.asyncio
+    async def test_async_reconnect_passes_timeout(self):
+        """Async reconnect() forwards timeout to Connect validation."""
+        handler = _make_real_async_handler()
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel"
+        ) as mock_ch, patch.object(
+            handler, "_setup_identifier_interceptor_for_channel", new_callable=AsyncMock
+        ) as mock_validate:
+            new_channel = Mock()
+            new_channel._unary_unary_interceptors = []
+            new_channel.close = AsyncMock()
+            mock_ch.return_value = new_channel
+            mock_validate.side_effect = lambda final_channel, stub, user, timeout=10: (
+                Mock(),
+                final_channel,
+                stub,
+            )
+            await handler.reconnect(timeout=30)
+
+        assert mock_validate.call_args.kwargs["timeout"] == 30
+
+    @pytest.mark.asyncio
+    async def test_async_concurrent_reconnect_keeps_channel_stub_coherent(self):
+        """Concurrent async reconnects leave the active channel and stub as a matching pair."""
+        handler = _make_real_async_handler()
+        original_channel = handler._async_channel
+        replacements = []
+
+        for _ in range(2):
+            channel = Mock()
+            channel._unary_unary_interceptors = []
+            channel.close = AsyncMock()
+            replacements.append(channel)
+
+        stub_by_channel = {}
+
+        async def validate(final_channel, stub, user, timeout=10):
+            stub_by_channel[final_channel] = stub
+            await asyncio.sleep(0)
+            return Mock(), final_channel, stub
+
+        with patch(
+            "pymilvus.client.async_grpc_handler.grpc.aio.insecure_channel",
+            side_effect=replacements,
+        ), patch.object(
+            handler,
+            "_setup_identifier_interceptor_for_channel",
+            side_effect=validate,
+        ):
+            await asyncio.gather(
+                handler.reconnect(address="first:19530"),
+                handler.reconnect(address="second:19530"),
+            )
+            await asyncio.sleep(0)
+
+        assert handler._async_channel in stub_by_channel
+        assert handler._async_stub is stub_by_channel[handler._async_channel]
+        assert handler._address in {"first:19530", "second:19530"}
+        assert handler._async_channel.close.await_count == 0
+        retired_close_count = sum(
+            channel.close.await_count for channel in [original_channel, *replacements]
+        )
+        assert retired_close_count == 2
+
+
+# =============================================================================
+# TestMilvusClientChangedCode
+# =============================================================================
+
+
+class TestMilvusClientChangedCode:
+    """Tests for changed code in MilvusClient (sync)."""
+
+    def test_user_password_token_construction(self):
+        """Test that user/password are combined into token when no token given."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+            client = MilvusClient(uri="http://localhost:19530", user="admin", password="secret")
+            assert client._config.token == "admin:secret"
+            client.close()
+
+    def test_explicit_token_overrides_user_password(self):
+        """Test that explicit token takes precedence over user/password."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+            client = MilvusClient(
+                uri="http://localhost:19530",
+                token="my_token",
+                user="admin",
+                password="secret",
+            )
+            assert client._config.token == "my_token"
+            client.close()
+
+    def test_get_connection_returns_handler(self):
+        """Test _get_connection returns the handler."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = mock_handler
+            client = MilvusClient(uri="http://localhost:19530")
+            assert client._get_connection() is mock_handler
+            client.close()
+
+    def test_get_connection_raises_when_closed(self):
+        """Test _get_connection raises MilvusException after close()."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler = _make_sync_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = mock_handler
+            client = MilvusClient(uri="http://localhost:19530")
+            client.close()
+
+            with pytest.raises(MilvusException, match="should create connection first"):
+                client._get_connection()
+
+    def test_use_database_updates_config(self):
+        """Test use_database updates _config.db_name."""
+        with patch("pymilvus.client.grpc_handler.GrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_sync_handler(
+                get_server_type=Mock(return_value="milvus"),
+                describe_database=Mock(return_value={}),
+            )
+            client = MilvusClient(uri="http://localhost:19530")
+            assert client._config.db_name == ""
+            client.use_database("mydb")
+            assert client._config.db_name == "mydb"
+            client.close()
+
+    def test_dedicated_kwarg(self):
+        """Test that dedicated kwarg is consumed and passed to get_or_create."""
+        with patch.object(ConnectionManager, "get_instance") as mock_get_instance:
+            mock_manager = Mock()
+            mock_handler = Mock()
+            mock_handler.get_server_type = Mock(return_value="milvus")
+            mock_manager.get_or_create.return_value = mock_handler
+            mock_get_instance.return_value = mock_manager
+
+            client = MilvusClient(uri="http://localhost:19530", dedicated=True)
+
+            call_kwargs = mock_manager.get_or_create.call_args
+            assert call_kwargs.kwargs.get("dedicated") is True
+            client.close()
+
+
+# =============================================================================
+# TestAsyncMilvusClientChangedCode
+# =============================================================================
+
+
+class TestAsyncMilvusClientChangedCode:
+    """Tests for changed code in AsyncMilvusClient."""
+
+    def test_init_deferred_state(self):
+        """Test __init__ sets deferred state without connecting."""
+        client = AsyncMilvusClient(uri="http://localhost:19530", token="test")
+        assert client._handler is None
+        assert client._manager is None
+        assert client._using is None
+        assert client.is_self_hosted is None
+        assert client._closed is False
+        assert client._config.address == "localhost:19530"
+        assert client._config.token == "test"
+
+    def test_user_password_token_construction(self):
+        """Test that user/password are combined into token when no token given."""
+        client = AsyncMilvusClient(uri="http://localhost:19530", user="admin", password="secret")
+        assert client._config.token == "admin:secret"
+
+    def test_explicit_token_overrides_user_password(self):
+        """Test that explicit token takes precedence over user/password."""
+        client = AsyncMilvusClient(
+            uri="http://localhost:19530",
+            token="my_token",
+            user="admin",
+            password="secret",
+        )
+        assert client._config.token == "my_token"
+
+    def test_dedicated_kwarg_stored(self):
+        """Test that dedicated kwarg is stored on client."""
+        client = AsyncMilvusClient(uri="http://localhost:19530", dedicated=True)
+        assert client._dedicated is True
+
+    @pytest.mark.asyncio
+    async def test_connect_sets_handler(self):
+        """Test _connect establishes connection and sets handler."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = mock_handler
+
+            await client._connect()
+
+            assert client._handler is mock_handler
+            assert client._manager is not None
+            assert client._using is not None
+            assert client.is_self_hosted is True
+
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_connect_idempotent(self):
+        """Test _connect is a no-op when already connected."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_async_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+
+            await client._connect()
+            first_handler = client._handler
+
+            await client._connect()  # second call should be no-op
+            assert client._handler is first_handler
+            assert mock_handler_cls.call_count == 1
+
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_context_manager(self):
+        """Test async with AsyncMilvusClient works."""
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = mock_handler
+
+            async with AsyncMilvusClient(uri="http://localhost:19530") as client:
+                assert client._handler is mock_handler
+
+            assert client._closed is True
+            assert client._handler is None
+
+    @pytest.mark.asyncio
+    async def test_get_connection_auto_connects(self):
+        """Test _get_connection auto-connects when not yet connected."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler = _make_async_handler(get_server_type=Mock(return_value="milvus"))
+            mock_handler_cls.return_value = mock_handler
+
+            conn = await client._get_connection()
+            assert conn is mock_handler
+            assert client._handler is mock_handler
+
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_get_connection_raises_when_closed(self):
+        """Test _get_connection raises MilvusException when client is closed."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_async_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+
+            await client._connect()
+            await client.close()
+
+            with pytest.raises(MilvusException, match="should create connection first"):
+                await client._get_connection()
+
+    def test_get_server_type_raises_when_not_connected(self):
+        """Test get_server_type raises when client not connected."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with pytest.raises(MilvusException, match="Client not connected"):
+            client.get_server_type()
+
+    @pytest.mark.asyncio
+    async def test_get_server_type_returns_type(self):
+        """Test get_server_type returns handler's server type when connected."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_async_handler(
+                get_server_type=Mock(return_value="zilliz")
+            )
+
+            await client._connect()
+            assert client.get_server_type() == "zilliz"
+
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_close_sets_closed_flag(self):
+        """Test close sets _closed=True and releases handler."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_async_handler(
+                get_server_type=Mock(return_value="milvus")
+            )
+
+            await client._connect()
+            assert client._handler is not None
+
+            await client.close()
+            assert client._closed is True
+            assert client._handler is None
+
+    @pytest.mark.asyncio
+    async def test_close_without_connect_is_safe(self):
+        """Test close without connect doesn't raise."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+        await client.close()  # Should not raise
+        assert client._closed is True
+
+    @pytest.mark.asyncio
+    async def test_use_database_updates_config(self):
+        """Test use_database updates _config.db_name."""
+        client = AsyncMilvusClient(uri="http://localhost:19530")
+
+        with patch("pymilvus.client.async_grpc_handler.AsyncGrpcHandler") as mock_handler_cls:
+            mock_handler_cls.return_value = _make_async_handler(
+                get_server_type=Mock(return_value="milvus"),
+                describe_database=AsyncMock(return_value={}),
+            )
+            await client._connect()
+            assert client._config.db_name == ""
+
+            await client.use_database("mydb")
+            assert client._config.db_name == "mydb"
+
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_uses_async_connection_manager(self):
+        """Test AsyncMilvusClient uses AsyncConnectionManager."""
+        with patch.object(AsyncConnectionManager, "get_instance") as mock_get_instance:
+            mock_manager = Mock()
+            mock_handler = Mock()
+            mock_handler.get_server_type = Mock(return_value="milvus")
+
+            async def mock_get_or_create(*args, **kwargs):
+                return mock_handler
+
+            mock_manager.get_or_create = mock_get_or_create
+            mock_manager.release = AsyncMock()
+            mock_get_instance.return_value = mock_manager
+
+            client = AsyncMilvusClient(uri="http://localhost:19530")
+            await client._connect()
+
+            mock_get_instance.assert_called()
+
+            await client.close()
+            mock_manager.release.assert_called_once()

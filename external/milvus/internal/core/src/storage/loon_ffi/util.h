@@ -1,0 +1,105 @@
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "common/type_c.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/manifest.h"
+#include "milvus-storage/properties.h"
+#include "storage/Types.h"
+
+/**
+ * @brief Create internal API Properties from CStorageConfig
+ *
+ * Creates a Properties object using the internal milvus_storage::api
+ * interface. All configuration fields from CStorageConfig are mapped to
+ * properties.
+ *
+ * @param c_storage_config The storage configuration to convert
+ * @return Shared pointer to milvus_storage::api::Properties
+ */
+std::shared_ptr<milvus_storage::api::Properties>
+MakeInternalPropertiesFromStorageConfig(CStorageConfig c_storage_config);
+
+/**
+ * @brief fs.root_path handed to the loon / Arrow filesystem for a storage
+ * config.
+ *
+ * Milvus keys already carry the storage prefix: localStorage.path for local
+ * (`/var/lib/milvus/data/insert_log/...`) and minio.rootPath for remote
+ * (`files/insert_log/...`). The filesystem therefore has to be rooted at the
+ * namespace root, which is the bucket for remote (milvus-storage never
+ * applies root_path there) and "/" for local. Rooting the local
+ * SubTreeFileSystem at localStorage.path joins the prefix twice
+ * (milvus-storage #351, milvus #53051), making complete keys differ from their
+ * physical locations.
+ */
+inline constexpr const char* kLoonLocalFSRootPath = "/";
+
+std::string
+LoonFSRootPath(const std::string& storage_type, const std::string& root_path);
+
+/**
+ * @brief Convert StorageConfig to C-style CStorageConfig
+ *
+ * Converts the C++ StorageConfig object into a CStorageConfig structure
+ * suitable for passing through FFI boundaries.
+ *
+ * @param config The StorageConfig object to convert
+ * @return CStorageConfig struct with copied configuration values
+ */
+CStorageConfig
+ToCStorageConfig(const milvus::storage::StorageConfig& config);
+
+/**
+ * @brief Retrieve ColumnGroups metadata from manifest path
+ *
+ * Parses the manifest path JSON and fetches the latest manifest
+ * containing column groups metadata from the storage.
+ *
+ * @param path JSON string containing "base_path" and "ver" fields
+ * @param properties Storage properties for accessing the manifest
+ * @return Shared pointer to ColumnGroups metadata
+ * @throws std::runtime_error If JSON parsing or manifest fetch fails
+ */
+std::shared_ptr<milvus_storage::api::Manifest>
+GetLoonManifest(
+    const std::string& path,
+    const std::shared_ptr<milvus_storage::api::Properties>& properties);
+
+/**
+ * @brief Inject every external_spec-derived property for external collections.
+ *
+ * Emits two property families from a single external_spec JSON:
+ *   - extfs.{collectionID}.* — storage-layer: credentials, endpoint, bucket,
+ *     region, SSL, IAM. Three-layer model:
+ *       Layer 0: zero-init bool fields and apply the process-local External
+ *                Table IOPS policy (no fs.* IOPS inheritance).
+ *       Layer 1: derive storage_type / use_ssl / bucket_name / address from
+ *                the external_source URI (Milvus form by default).
+ *       Layer 2: apply external_spec.extfs JSON with allowlist gating.
+ *       Post-process: explicit endpoint_url mapping, or the legacy AWS-form
+ *       swap + Tier-1/2 endpoint derivation when endpoint_url is absent.
+ *   - format-layer — per-format keys derived from spec.format (e.g.
+ *     reader.exttable.snapshot_id when format="iceberg-table").
+ *
+ * The caller MUST have run ValidateExternalSource (Go side) first — this
+ * function asserts non-empty scheme and host on external_source.
+ */
+void
+InjectExternalSpecProperties(milvus_storage::api::Properties& properties,
+                             int64_t collection_id,
+                             const std::string& external_source,
+                             const std::string& external_spec);

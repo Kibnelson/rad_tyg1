@@ -1,0 +1,11 @@
+numpy==1.26.4
+polars==1.32.3
+pyarrow==25.0.1
+mmh3==5.2.0
+psutil==7.1.0
+pybind11==3.0.1
+cmake==3.30.5
+conan==2.25.1
+packaging>=24
+setuptools>=68
+wheel

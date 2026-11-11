@@ -1,0 +1,595 @@
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#include <gtest/gtest.h>
+#include <stdint.h>
+#include <algorithm>
+#include <limits>
+#include <memory>
+#include <random>
+#include <string>
+#include <vector>
+
+#include "common/FieldMeta.h"
+#include "common/Schema.h"
+#include "common/Types.h"
+#include "common/VectorArray.h"
+#include "filemanager/InputStream.h"
+#include "gtest/gtest.h"
+#include "pb/common.pb.h"
+#include "pb/schema.pb.h"
+
+using namespace milvus;
+
+TEST(VectorArray, TestSchema) {
+    namespace milvus_pb = milvus::proto;
+    milvus_pb::schema::CollectionSchema proto;
+    proto.set_name("col");
+    proto.set_description("asdfhsalkgfhsadg");
+    std::string varchar_dafualt_vlaue = "20";
+
+    {
+        auto field = proto.add_fields();
+        field->set_name("key");
+        field->set_nullable(false);
+        field->set_fieldid(100);
+        field->set_is_primary_key(true);
+        field->set_description("asdgfsagf");
+        field->set_data_type(milvus_pb::schema::DataType::Int64);
+    }
+
+    {
+        auto struct_field = proto.add_struct_array_fields();
+        struct_field->set_name("struct");
+        struct_field->set_fieldid(101);
+
+        auto field = struct_field->add_fields();
+        field->set_name("struct_key");
+        field->set_nullable(false);
+        field->set_fieldid(102);
+        field->set_data_type(milvus_pb::schema::DataType::Array);
+        field->set_element_type(milvus_pb::schema::DataType::Int64);
+
+        auto field2 = struct_field->add_fields();
+        field2->set_name("struct_float_vec");
+        field2->set_fieldid(103);
+        field2->set_data_type(milvus_pb::schema::DataType::ArrayOfVector);
+        field2->set_element_type(milvus_pb::schema::DataType::FloatVector);
+        auto param = field2->add_type_params();
+        param->set_key("dim");
+        param->set_value("16");
+        auto iparam = field2->add_index_params();
+        iparam->set_key("metric_type");
+        iparam->set_value("L2");
+    }
+
+    auto schema = Schema::ParseFrom(proto);
+    auto field = schema->operator[](FieldId(102));
+    ASSERT_EQ(field.get_data_type(), DataType::ARRAY);
+    ASSERT_EQ(field.get_element_type(), DataType::INT64);
+
+    auto field2 = schema->operator[](FieldId(103));
+    ASSERT_EQ(field2.get_data_type(), DataType::VECTOR_ARRAY);
+    ASSERT_EQ(field2.get_element_type(), DataType::VECTOR_FLOAT);
+    ASSERT_EQ(field2.get_dim(), 16);
+}
+
+std::vector<float>
+generate_float_vector(int64_t seed, int64_t N, int64_t dim) {
+    std::vector<float> final(dim * N);
+    for (int n = 0; n < N; ++n) {
+        // generate random float vector
+        std::vector<float> data(dim);
+        std::default_random_engine er2(seed + n);
+        std::normal_distribution<> distr2(0, 1);
+        for (auto& x : data) {
+            x = distr2(er2);
+        }
+
+        std::copy(data.begin(), data.end(), final.begin() + dim * n);
+    }
+    return final;
+};
+
+namespace {
+
+struct ElementNullableByteVectorParam {
+    DataType data_type;
+    int64_t dim;
+    std::string name;
+};
+
+void
+SetByteVectorPayload(VectorFieldProto* field,
+                     DataType data_type,
+                     const std::string& payload) {
+    switch (data_type) {
+        case DataType::VECTOR_BINARY:
+            field->set_binary_vector(payload);
+            return;
+        case DataType::VECTOR_FLOAT16:
+            field->set_float16_vector(payload);
+            return;
+        case DataType::VECTOR_BFLOAT16:
+            field->set_bfloat16_vector(payload);
+            return;
+        case DataType::VECTOR_INT8:
+            field->set_int8_vector(payload);
+            return;
+        default:
+            FAIL() << "unsupported byte vector type "
+                   << static_cast<int>(data_type);
+    }
+}
+
+std::string
+GetByteVectorPayload(const VectorFieldProto& field, DataType data_type) {
+    switch (data_type) {
+        case DataType::VECTOR_BINARY:
+            return field.binary_vector();
+        case DataType::VECTOR_FLOAT16:
+            return field.float16_vector();
+        case DataType::VECTOR_BFLOAT16:
+            return field.bfloat16_vector();
+        case DataType::VECTOR_INT8:
+            return field.int8_vector();
+        default:
+            ADD_FAILURE() << "unsupported byte vector type "
+                          << static_cast<int>(data_type);
+            return {};
+    }
+}
+
+void
+ExpectVectorArraysEqualForTest(const milvus::VectorArray& lhs,
+                               const milvus::VectorArray& rhs) {
+    EXPECT_EQ(lhs.physical_length(), rhs.physical_length());
+    EXPECT_EQ(lhs.dim(), rhs.dim());
+    EXPECT_EQ(lhs.get_element_type(), rhs.get_element_type());
+    EXPECT_EQ(lhs.byte_size(), rhs.byte_size());
+    EXPECT_EQ(lhs.output_data().SerializeAsString(),
+              rhs.output_data().SerializeAsString());
+}
+
+TargetBitmap
+ElementValidityForTest(const VectorFieldProto& field) {
+    TargetBitmap validity(field.valid_data_size(), false);
+    for (int i = 0; i < field.valid_data_size(); ++i) {
+        if (field.valid_data(i)) {
+            validity.set(i);
+        }
+    }
+    return validity;
+}
+
+VectorArrayView
+MakeElementNullableVectorArrayViewForTest(
+    const milvus::VectorArray& array,
+    const TargetBitmapView& element_valid_data) {
+    return VectorArrayView(const_cast<char*>(array.data()),
+                           array.dim(),
+                           element_valid_data.size(),
+                           array.byte_size(),
+                           array.get_element_type(),
+                           element_valid_data,
+                           true);
+}
+
+class ElementNullableByteVectorArrayTest
+    : public ::testing::TestWithParam<ElementNullableByteVectorParam> {};
+
+}  // namespace
+
+TEST(VectorArray, TestConstructVectorArray) {
+    using namespace milvus;
+
+    int N = 10;
+    // 1. test float vector
+    int64_t dim = 128;
+    milvus::proto::schema::VectorField field_float_vector_array;
+    field_float_vector_array.set_dim(dim);
+
+    auto data = generate_float_vector(100, N, dim);
+    field_float_vector_array.mutable_float_vector()->mutable_data()->Add(
+        data.begin(), data.end());
+
+    auto float_vector_array =
+        milvus::VectorArray(field_float_vector_array, false);
+    ASSERT_EQ(float_vector_array.physical_length(), N);
+    ASSERT_EQ(float_vector_array.dim(), dim);
+    ASSERT_EQ(float_vector_array.get_element_type(), DataType::VECTOR_FLOAT);
+    ASSERT_EQ(float_vector_array.byte_size(), N * dim * sizeof(float));
+
+    auto float_vector_array_tmp = milvus::VectorArray(float_vector_array);
+    ExpectVectorArraysEqualForTest(float_vector_array_tmp, float_vector_array);
+
+    // todo: add other vector types
+}
+
+TEST(VectorArray, DefaultPlaceholderCanBeCopied) {
+    milvus::VectorArray array;
+    milvus::VectorArray copied(array);
+
+    EXPECT_EQ(copied.physical_length(), 0);
+    EXPECT_EQ(copied.dim(), 0);
+    EXPECT_EQ(copied.byte_size(), 0);
+    EXPECT_EQ(copied.get_element_type(), DataType::NONE);
+    EXPECT_EQ(copied.data(), nullptr);
+
+    milvus::VectorArrayView view;
+    milvus::VectorArrayView copied_view(view);
+    EXPECT_EQ(copied_view.length(), 0);
+}
+
+TEST(VectorArray, TestConstructorWithData) {
+    using namespace milvus;
+
+    int N = 10;  // number of vectors
+    int64_t dim = 128;
+
+    // Generate test data
+    auto data = generate_float_vector(42, N, dim);
+
+    // Test 1: Direct construction from raw float data
+    {
+        milvus::VectorArray va(data.data(), N, dim, DataType::VECTOR_FLOAT);
+
+        ASSERT_EQ(va.physical_length(), N);
+        ASSERT_EQ(va.dim(), dim);
+        ASSERT_EQ(va.get_element_type(), DataType::VECTOR_FLOAT);
+        ASSERT_EQ(va.byte_size(), N * dim * sizeof(float));
+
+        auto actual = reinterpret_cast<const float*>(va.data());
+        ASSERT_TRUE(std::equal(data.begin(), data.end(), actual));
+    }
+
+    // Test 2: Compare with protobuf-based constructor
+    {
+        // Create via protobuf
+        milvus::proto::schema::VectorField field_proto;
+        field_proto.set_dim(dim);
+        field_proto.mutable_float_vector()->mutable_data()->Add(data.begin(),
+                                                                data.end());
+        milvus::VectorArray va_proto(field_proto, false);
+
+        // Create via data constructor
+        milvus::VectorArray va_direct(
+            data.data(), N, dim, DataType::VECTOR_FLOAT);
+
+        // Both should be equal
+        ASSERT_EQ(va_proto.physical_length(), va_direct.physical_length());
+        ASSERT_EQ(va_proto.dim(), va_direct.dim());
+        ASSERT_EQ(va_proto.byte_size(), va_direct.byte_size());
+        ASSERT_EQ(va_proto.get_element_type(), va_direct.get_element_type());
+
+        ExpectVectorArraysEqualForTest(va_proto, va_direct);
+    }
+
+    // Test 3: Test with edge cases
+    {
+        // Single vector
+        milvus::VectorArray va_single(
+            data.data(), 1, dim, DataType::VECTOR_FLOAT);
+        ASSERT_EQ(va_single.physical_length(), 1);
+        ASSERT_EQ(va_single.byte_size(), dim * sizeof(float));
+
+        // Small dimension
+        int64_t small_dim = 4;
+        auto small_data = generate_float_vector(123, 5, small_dim);
+        milvus::VectorArray va_small(
+            small_data.data(), 5, small_dim, DataType::VECTOR_FLOAT);
+        ASSERT_EQ(va_small.physical_length(), 5);
+        ASSERT_EQ(va_small.dim(), small_dim);
+    }
+}
+
+TEST(VectorArray, ElementNullableCompactProtoStaysCompactAtRuntime) {
+    constexpr int64_t dim = 2;
+
+    VectorFieldProto input;
+    input.set_dim(dim);
+    input.mutable_float_vector()->add_data(1.0F);
+    input.mutable_float_vector()->add_data(2.0F);
+    input.mutable_float_vector()->add_data(5.0F);
+    input.mutable_float_vector()->add_data(6.0F);
+    input.add_valid_data(true);
+    input.add_valid_data(false);
+    input.add_valid_data(true);
+
+    milvus::VectorArray array(input, true);
+    ASSERT_EQ(array.physical_length(), 2);
+    ASSERT_EQ(array.byte_size(), 4 * sizeof(float));
+
+    auto compact_data = reinterpret_cast<const float*>(array.data());
+    EXPECT_FLOAT_EQ(compact_data[0], 1.0F);
+    EXPECT_FLOAT_EQ(compact_data[1], 2.0F);
+    EXPECT_FLOAT_EQ(compact_data[2], 5.0F);
+    EXPECT_FLOAT_EQ(compact_data[3], 6.0F);
+
+    auto output = array.output_data();
+    ASSERT_EQ(output.valid_data_size(), 3);
+    EXPECT_TRUE(output.valid_data(0));
+    EXPECT_FALSE(output.valid_data(1));
+    EXPECT_TRUE(output.valid_data(2));
+    ASSERT_EQ(output.float_vector().data_size(), 4);
+    EXPECT_FLOAT_EQ(output.float_vector().data(0), 1.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(1), 2.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(2), 5.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(3), 6.0F);
+
+    milvus::VectorArray restored(output, true);
+    ExpectVectorArraysEqualForTest(restored, array);
+    milvus::VectorArray copied(array);
+    ExpectVectorArraysEqualForTest(copied, array);
+    milvus::VectorArray assigned;
+    assigned = array;
+    ExpectVectorArraysEqualForTest(assigned, array);
+
+    auto validity = ElementValidityForTest(output);
+    auto view =
+        MakeElementNullableVectorArrayViewForTest(array, validity.view());
+    EXPECT_EQ(view.length(), 3);
+    EXPECT_EQ(view.output_data().SerializeAsString(),
+              output.SerializeAsString());
+    milvus::VectorArrayView copied_view(view);
+    EXPECT_EQ(copied_view.output_data().SerializeAsString(),
+              output.SerializeAsString());
+}
+
+TEST(VectorArray, ElementNullableRawConstructorUsesCompactPayload) {
+    constexpr int64_t dim = 2;
+    std::vector<float> compact_data = {1.0F, 2.0F, 5.0F, 6.0F};
+    TargetBitmap validity(3, false);
+    validity.set(0);
+    validity.set(2);
+
+    milvus::VectorArray array(compact_data.data(),
+                              3,
+                              dim,
+                              DataType::VECTOR_FLOAT,
+                              validity.view(),
+                              true);
+
+    EXPECT_EQ(array.physical_length(), 2);
+    EXPECT_EQ(array.byte_size(), compact_data.size() * sizeof(float));
+    auto output = array.output_data();
+    ASSERT_EQ(output.float_vector().data_size(), 4);
+    EXPECT_FLOAT_EQ(output.float_vector().data(0), 1.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(1), 2.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(2), 5.0F);
+    EXPECT_FLOAT_EQ(output.float_vector().data(3), 6.0F);
+    ASSERT_EQ(output.valid_data_size(), 3);
+    EXPECT_TRUE(output.valid_data(0));
+    EXPECT_FALSE(output.valid_data(1));
+    EXPECT_TRUE(output.valid_data(2));
+}
+
+TEST(VectorArray, ElementNullableLogicalEmptyPreservesTypedPayload) {
+    constexpr int64_t dim = 2;
+    VectorFieldProto input;
+    input.set_dim(dim);
+    input.mutable_float_vector();
+
+    milvus::VectorArray array(input, true);
+    EXPECT_EQ(array.physical_length(), 0);
+    EXPECT_EQ(array.byte_size(), 0);
+    EXPECT_EQ(array.data(), nullptr);
+
+    auto output = array.output_data();
+    EXPECT_EQ(output.data_case(), VectorFieldProto::kFloatVector);
+    EXPECT_EQ(output.dim(), dim);
+    EXPECT_EQ(output.float_vector().data_size(), 0);
+    EXPECT_EQ(output.valid_data_size(), 0);
+}
+
+TEST(VectorArray, ElementNullableMissingTypedPayloadIsRejected) {
+    VectorFieldProto input;
+    input.set_dim(2);
+    input.add_valid_data(false);
+
+    EXPECT_ANY_THROW((void)milvus::VectorArray(input, true));
+}
+
+TEST(VectorArray, ElementNullableByteVectorRoundTrip) {
+    constexpr int64_t dim = 16;
+
+    VectorFieldProto input;
+    input.set_dim(dim);
+    input.mutable_binary_vector()->assign("\x01\x02\x03\x04", 4);
+    input.add_valid_data(true);
+    input.add_valid_data(false);
+    input.add_valid_data(true);
+
+    milvus::VectorArray array(input, true);
+    ASSERT_EQ(array.physical_length(), 2);
+    EXPECT_EQ(array.byte_size(), 4);
+    EXPECT_EQ(std::string(array.data(), array.byte_size()),
+              std::string("\x01\x02\x03\x04", 4));
+
+    auto output = array.output_data();
+    EXPECT_EQ(output.binary_vector(), std::string("\x01\x02\x03\x04", 4));
+    EXPECT_EQ(output.valid_data_size(), 3);
+}
+
+TEST_P(ElementNullableByteVectorArrayTest, CompactProtoRoundTrips) {
+    const auto& param = GetParam();
+    const auto bytes_per_vector =
+        vector_bytes_per_element(param.data_type, param.dim);
+    std::string compact_payload(bytes_per_vector * 2, '\0');
+    for (size_t i = 0; i < compact_payload.size(); ++i) {
+        compact_payload[i] = static_cast<char>(i + 1);
+    }
+
+    VectorFieldProto input;
+    input.set_dim(param.dim);
+    SetByteVectorPayload(&input, param.data_type, compact_payload);
+    input.add_valid_data(true);
+    input.add_valid_data(false);
+    input.add_valid_data(true);
+
+    milvus::VectorArray array(input, true);
+    ASSERT_EQ(array.get_element_type(), param.data_type);
+    ASSERT_EQ(array.physical_length(), 2);
+    ASSERT_EQ(array.byte_size(), bytes_per_vector * 2);
+
+    EXPECT_EQ(std::string(array.data(), array.byte_size()), compact_payload);
+
+    auto output = array.output_data();
+    EXPECT_EQ(GetByteVectorPayload(output, param.data_type), compact_payload);
+    ASSERT_EQ(output.valid_data_size(), 3);
+    EXPECT_TRUE(output.valid_data(0));
+    EXPECT_FALSE(output.valid_data(1));
+    EXPECT_TRUE(output.valid_data(2));
+
+    milvus::VectorArray restored(output, true);
+    EXPECT_EQ(std::string(restored.data(), restored.byte_size()),
+              std::string(array.data(), array.byte_size()));
+    auto validity = ElementValidityForTest(output);
+    auto view =
+        MakeElementNullableVectorArrayViewForTest(array, validity.view());
+    EXPECT_EQ(view.output_data().SerializeAsString(),
+              output.SerializeAsString());
+}
+
+TEST_P(ElementNullableByteVectorArrayTest,
+       AllInvalidElementsPreserveTypedEmptyPayload) {
+    const auto& param = GetParam();
+    VectorFieldProto input;
+    input.set_dim(param.dim);
+    SetByteVectorPayload(&input, param.data_type, {});
+    input.add_valid_data(false);
+    input.add_valid_data(false);
+
+    milvus::VectorArray array(input, true);
+    ASSERT_EQ(array.physical_length(), 0);
+    EXPECT_EQ(array.byte_size(), 0);
+
+    auto output = array.output_data();
+    EXPECT_NE(output.data_case(), VectorFieldProto::DATA_NOT_SET);
+    EXPECT_TRUE(GetByteVectorPayload(output, param.data_type).empty());
+    ASSERT_EQ(output.valid_data_size(), 2);
+    EXPECT_FALSE(output.valid_data(0));
+    EXPECT_FALSE(output.valid_data(1));
+
+    milvus::VectorArray copied(array);
+    EXPECT_EQ(copied.output_data().SerializeAsString(),
+              output.SerializeAsString());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ByteVectorTypes,
+    ElementNullableByteVectorArrayTest,
+    ::testing::Values(
+        ElementNullableByteVectorParam{
+            DataType::VECTOR_BINARY, 16, "BinaryVector"},
+        ElementNullableByteVectorParam{
+            DataType::VECTOR_FLOAT16, 2, "Float16Vector"},
+        ElementNullableByteVectorParam{
+            DataType::VECTOR_BFLOAT16, 2, "BFloat16Vector"},
+        ElementNullableByteVectorParam{DataType::VECTOR_INT8, 4, "Int8Vector"}),
+    [](const ::testing::TestParamInfo<ElementNullableByteVectorParam>& info) {
+        return info.param.name;
+    });
+
+TEST(VectorArray, ElementNullableValidationRejectsInvalidCompactPayload) {
+    constexpr int64_t dim = 2;
+
+    VectorFieldProto mismatched;
+    mismatched.set_dim(dim);
+    mismatched.mutable_float_vector()->add_data(1.0F);
+    mismatched.mutable_float_vector()->add_data(2.0F);
+    mismatched.mutable_float_vector()->add_data(3.0F);
+    mismatched.mutable_float_vector()->add_data(4.0F);
+    mismatched.add_valid_data(true);
+    mismatched.add_valid_data(false);
+    EXPECT_ANY_THROW(milvus::VectorArray(mismatched, true));
+
+    VectorFieldProto unexpected_validity;
+    unexpected_validity.set_dim(dim);
+    unexpected_validity.mutable_float_vector()->add_data(1.0F);
+    unexpected_validity.mutable_float_vector()->add_data(2.0F);
+    unexpected_validity.add_valid_data(true);
+    EXPECT_ANY_THROW((void)milvus::VectorArray(unexpected_validity, false));
+}
+
+TEST(VectorArray, RejectsInvalidDimensions) {
+    for (const int64_t dim :
+         {int64_t{0}, int64_t{-1}, std::numeric_limits<int64_t>::max()}) {
+        proto::schema::VectorField field;
+        field.set_dim(dim);
+        field.mutable_float_vector()->add_data(1.0f);
+        EXPECT_ANY_THROW({ milvus::VectorArray array(field, false); });
+    }
+}
+
+TEST(VectorArray, RejectsPartialVectors) {
+    std::vector<proto::schema::VectorField> fields(5);
+    fields[0].set_dim(3);
+    for (int i = 0; i < 4; ++i) {
+        fields[0].mutable_float_vector()->add_data(static_cast<float>(i));
+    }
+    fields[1].set_dim(16);
+    fields[1].set_binary_vector(std::string(3, 'x'));
+    fields[2].set_dim(2);
+    fields[2].set_float16_vector(std::string(5, 'x'));
+    fields[3].set_dim(2);
+    fields[3].set_bfloat16_vector(std::string(5, 'x'));
+    fields[4].set_dim(3);
+    fields[4].set_int8_vector(std::string(4, 'x'));
+
+    for (const auto& field : fields) {
+        SCOPED_TRACE(static_cast<int>(field.data_case()));
+        EXPECT_ANY_THROW({ milvus::VectorArray array(field, false); });
+    }
+}
+
+TEST(VectorArray, OwnedBytesRoundTripForEveryEncoding) {
+    std::vector<proto::schema::VectorField> fields(5);
+    for (auto& field : fields) {
+        field.set_dim(16);
+    }
+    for (int i = 0; i < 32; ++i) {
+        fields[0].mutable_float_vector()->add_data(static_cast<float>(i));
+    }
+    fields[1].set_binary_vector(std::string(4, 'a'));
+    fields[2].set_float16_vector(std::string(64, 'b'));
+    fields[3].set_bfloat16_vector(std::string(64, 'c'));
+    fields[4].set_int8_vector(std::string(32, 'd'));
+
+    for (const auto& field : fields) {
+        SCOPED_TRACE(static_cast<int>(field.data_case()));
+        milvus::VectorArray array(field, false);
+        EXPECT_EQ(array.physical_length(), 2);
+        EXPECT_EQ(array.output_data().SerializeAsString(),
+                  field.SerializeAsString());
+        milvus::VectorArray copy(array);
+        EXPECT_NE(copy.data(), array.data());
+        EXPECT_EQ(copy.output_data().SerializeAsString(),
+                  field.SerializeAsString());
+    }
+}
+
+TEST(VectorArray, EmptyRowsPreserveEncoding) {
+    std::vector<proto::schema::VectorField> fields(5);
+    fields[0].mutable_float_vector();
+    fields[1].mutable_binary_vector();
+    fields[2].mutable_float16_vector();
+    fields[3].mutable_bfloat16_vector();
+    fields[4].mutable_int8_vector();
+    for (auto& field : fields) {
+        field.set_dim(16);
+        milvus::VectorArray array(field, false);
+        EXPECT_EQ(array.physical_length(), 0);
+        EXPECT_EQ(array.byte_size(), 0);
+        EXPECT_EQ(array.output_data().SerializeAsString(),
+                  field.SerializeAsString());
+    }
+}

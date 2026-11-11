@@ -1,0 +1,289 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <unordered_map>
+#include <vector>
+#include <stdio.h>
+#include <stdlib.h>
+#include <iostream>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <tuple>
+#include <map>
+#include <string>
+#include <boost/algorithm/string.hpp>
+
+#include "common/Common.h"
+#include "common/Types.h"
+#include "common/FieldData.h"
+#include "common/QueryInfo.h"
+#include "common/RangeSearchHelper.h"
+#include "index/IndexInfo.h"
+#include "index/ScalarIndex.h"
+#include "storage/Types.h"
+#include "storage/DataCodec.h"
+#include "log/Log.h"
+
+namespace milvus::index {
+
+size_t
+get_file_size(int fd);
+
+std::vector<std::tuple<IndexType, MetricType>>
+unsupported_index_combinations();
+
+bool
+is_unsupported(const IndexType& index_type, const MetricType& metric_type);
+
+bool
+CheckKeyInConfig(const Config& cfg, const std::string& key);
+
+void
+ParseFromString(google::protobuf::Message& params, const std::string& str);
+
+template <typename T>
+inline std::optional<T>
+GetValueFromConfig(const Config& cfg, const std::string& key) {
+    if (!cfg.contains(key)) {
+        return std::nullopt;
+    }
+
+    const auto& value = cfg.at(key);
+    if (value.is_null()) {
+        return std::nullopt;
+    }
+
+    try {
+        if constexpr (std::is_same_v<T, bool>) {
+            if (value.is_boolean()) {
+                return value.get<bool>();
+            }
+            // compatibility for boolean string
+            return boost::algorithm::to_lower_copy(value.get<std::string>()) ==
+                   "true";
+        }
+        // compatibility for numeric string (e.g., from index_params which is map<string,string>)
+        if constexpr (std::is_integral_v<T>) {
+            if (value.is_string()) {
+                auto str = value.get<std::string>();
+                if constexpr (std::is_signed_v<T>) {
+                    return static_cast<T>(std::stoll(str));
+                } else {
+                    return static_cast<T>(std::stoull(str));
+                }
+            }
+        }
+        return value.get<T>();
+    } catch (const nlohmann::json::type_error& e) {
+        if (!CONFIG_PARAM_TYPE_CHECK_ENABLED) {
+            LOG_WARN("config type mismatch for key {}: {}", key, e.what());
+            return std::nullopt;
+        }
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "config type error for key {}: {}",
+                  key,
+                  e.what());
+    } catch (const std::exception& e) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Unexpected error for key {}: {}",
+                  key,
+                  e.what());
+    }
+    return std::nullopt;
+}
+
+template <typename T>
+inline void
+CheckMetricTypeSupport(const MetricType& metric_type) {
+    if constexpr (std::is_same_v<T, bin1>) {
+        AssertInfo(
+            IsBinaryVectorMetricType(metric_type),
+            "binary vector does not support metric type: " + metric_type);
+    } else if constexpr (std::is_same_v<T, int8>) {
+        AssertInfo(IsIntVectorMetricType(metric_type),
+                   "int vector does not support metric type: " + metric_type);
+    } else {
+        AssertInfo(IsFloatVectorMetricType(metric_type),
+                   "float vector does not support metric type: " + metric_type);
+    }
+}
+
+int64_t
+GetDimFromConfig(const Config& config);
+
+std::string
+GetMetricTypeFromConfig(const Config& config);
+
+std::string
+GetIndexTypeFromConfig(const Config& config);
+
+IndexVersion
+GetIndexEngineVersionFromConfig(const Config& config);
+
+int32_t
+GetBitmapCardinalityLimitFromConfig(const Config& config);
+
+ScalarIndexType
+GetHybridLowCardinalityIndexTypeFromConfig(const Config& config);
+
+ScalarIndexType
+GetHybridHighCardinalityIndexTypeFromConfig(const Config& config);
+
+Config
+ParseConfigFromIndexParams(
+    const std::map<std::string, std::string>& index_params);
+
+struct IndexDataCodec {
+    std::list<std::unique_ptr<storage::DataCodec>> codecs_{};
+    int64_t size_{0};
+};
+
+std::map<std::string, IndexDataCodec>
+CompactIndexDatas(
+    std::map<std::string, std::unique_ptr<storage::DataCodec>>& index_datas);
+
+IndexDataCodec
+CompactIndexDatasByKey(
+    const std::string& key,
+    std::unique_ptr<storage::DataCodec> slice_meta,
+    std::map<std::string, std::unique_ptr<storage::DataCodec>>& index_datas);
+
+std::unique_ptr<storage::DataCodec>
+AssembleIndexDataCodec(const IndexDataCodec& index_slices);
+
+std::unique_ptr<storage::DataCodec>
+AssembleIndexDataCodec(IndexDataCodec&& index_slices);
+
+void
+AssembleIndexDatas(
+    std::map<std::string, std::unique_ptr<storage::DataCodec>>& index_datas,
+    BinarySet& index_binary_set);
+
+void
+AssembleIndexDatas(std::map<std::string, IndexDataCodec>& index_datas,
+                   BinarySet& index_binary_set);
+
+void
+AssembleIndexDatas(std::map<std::string, FieldDataChannelPtr>& index_datas,
+                   std::unordered_map<std::string, FieldDataPtr>& result);
+
+// On Linux, read() (and similar system calls) will transfer at most 0x7ffff000 (2,147,479,552) bytes once
+void
+ReadDataFromFD(int fd, void* buf, size_t size, size_t chunk_size = 0x7ffff000);
+
+bool
+CheckAndUpdateKnowhereRangeSearchParam(const SearchInfo& search_info,
+                                       const int64_t topk,
+                                       const MetricType& metric_type,
+                                       knowhere::Json& search_config);
+
+// for unused
+void inline SetBitsetUnused(void* bitset, const uint32_t* doc_id, uintptr_t n) {
+    ThrowInfo(ErrorCode::UnexpectedError, "SetBitsetUnused is not supported");
+}
+
+// Sets the bits at doc_id[0..n).
+//
+// The input is walked in blocks of one word's worth of doc_ids. A block whose
+// ids are consecutive (e.g. a range query over insertion-ordered data) is
+// written with one or two word ORs; any other block sets its bits one by one.
+// Only a block's first and last id are inspected unless they are exactly one
+// word apart, so the check costs a few instructions per block. The per-id
+// path indexes a mask table instead of shifting by a variable amount, which
+// gcc otherwise emits as a 3-uop `shl r64, cl` on generic x86-64.
+// Correctness does not depend on doc_ids being sorted or unique.
+//
+// With AssumeInRange, doc_ids >= bitmap size are a bug: asserted in debug
+// builds and unchecked otherwise. Without it they are skipped.
+template <bool AssumeInRange>
+void inline SetDocIdBits(TargetBitmap* bitmap,
+                         const uint32_t* doc_id,
+                         uintptr_t n) {
+    using word_t = TargetBitmap::data_type;
+    constexpr uintptr_t kBitsPerWord = sizeof(word_t) * 8;
+    alignas(64) static constexpr auto kSingleBitMasks = [] {
+        std::array<word_t, kBitsPerWord> masks{};
+        for (uintptr_t i = 0; i < kBitsPerWord; ++i) {
+            masks[i] = word_t{1} << i;
+        }
+        return masks;
+    }();
+
+    auto* words = bitmap->data();
+    const auto bitmap_size = bitmap->size();
+
+    uintptr_t i = 0;
+    while (i < n) {
+        const uintptr_t end = std::min(i + kBitsPerWord, n);
+        const uint32_t first = doc_id[i];
+        if (end - i == kBitsPerWord &&
+            doc_id[end - 1] == first + kBitsPerWord - 1 &&
+            first + kBitsPerWord <= bitmap_size) {
+            // XOR-OR reduction so the compiler vectorizes the verification.
+            uint32_t mismatch = 0;
+            for (uint32_t k = 0; k < kBitsPerWord; ++k) {
+                mismatch |= doc_id[i + k] ^ (first + k);
+            }
+            if (mismatch == 0) {
+                const auto word = first / kBitsPerWord;
+                const auto shift = first % kBitsPerWord;
+                words[word] |= ~word_t{0} << shift;
+                if (shift != 0) {
+                    words[word + 1] |= ~word_t{0} >> (kBitsPerWord - shift);
+                }
+                i = end;
+                continue;
+            }
+        }
+        for (; i < end; ++i) {
+            const uint32_t id = doc_id[i];
+            if constexpr (AssumeInRange) {
+                assert(id < bitmap_size);
+            } else if (id >= bitmap_size) {
+                continue;
+            }
+            words[id / kBitsPerWord] |= kSingleBitMasks[id % kBitsPerWord];
+        }
+    }
+}
+
+// For sealed segment, the doc_id is guaranteed to be less than bitset size which equals to the doc count of tantivy before querying.
+void inline SetBitsetSealed(void* bitset, const uint32_t* doc_id, uintptr_t n) {
+    auto* bitmap = static_cast<TargetBitmap*>(bitset);
+    SetDocIdBits<true>(bitmap, doc_id, n);
+}
+
+// For growing segment, concurrent insert exists, so the doc_id may exceed bitset size.
+void inline SetBitsetGrowing(void* bitset,
+                             const uint32_t* doc_id,
+                             uintptr_t n) {
+    auto* bitmap = static_cast<TargetBitmap*>(bitset);
+    SetDocIdBits<false>(bitmap, doc_id, n);
+}
+
+// Get the SSO (Small String Optimization) threshold for std::string.
+// Strings with capacity <= this threshold store data inline (no heap allocation).
+inline size_t
+GetStringSSOThreshold() {
+    static const size_t threshold = std::string().capacity();
+    return threshold;
+}
+
+}  // namespace milvus::index

@@ -1,0 +1,429 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <memory>
+#include <map>
+#include <limits>
+#include <string>
+#include <queue>
+#include <utility>
+#include <vector>
+#include <boost/align/aligned_allocator.hpp>
+#include <boost/dynamic_bitset.hpp>
+#include <NamedType/named_type.hpp>
+
+#include "common/BitsetView.h"
+#include "common/EasyAssert.h"
+#include "common/FieldMeta.h"
+#include "common/ArrayOffsets.h"
+#include "common/Types.h"
+#include "pb/schema.pb.h"
+#include "knowhere/index/index_node.h"
+
+namespace milvus {
+
+namespace segcore {
+class SegmentReadLease;
+class SegmentReadSnapshot;
+}  // namespace segcore
+
+// scan cost in each search/query
+struct StorageCost {
+    int64_t scanned_remote_bytes = 0;
+    int64_t scanned_total_bytes = 0;
+
+    StorageCost() = default;
+};
+
+struct OffsetDisPair {
+ private:
+    std::pair<int64_t, float> off_dis_;
+    int iterator_idx_;
+
+ public:
+    OffsetDisPair(std::pair<int64_t, float> off_dis, int iter_idx)
+        : off_dis_(off_dis), iterator_idx_(iter_idx) {
+    }
+
+    const std::pair<int64_t, float>&
+    GetOffDis() const {
+        return off_dis_;
+    }
+
+    int
+    GetIteratorIdx() const {
+        return iterator_idx_;
+    }
+};
+
+struct OffsetDisPairComparator {
+    bool larger_is_closer_ = false;
+
+    OffsetDisPairComparator(bool larger_is_closer = false)
+        : larger_is_closer_(larger_is_closer) {
+    }
+
+    bool
+    operator()(const std::shared_ptr<OffsetDisPair>& left,
+               const std::shared_ptr<OffsetDisPair>& right) const {
+        // For priority_queue: return true if left has lower priority than right
+        // We want the element with better (closer) distance at the top
+        if (left->GetOffDis().second != right->GetOffDis().second) {
+            if (larger_is_closer_) {
+                // IP/Cosine: larger distance is better, smaller has lower priority
+                return left->GetOffDis().second < right->GetOffDis().second;
+            } else {
+                // L2: smaller distance is better, larger has lower priority
+                return left->GetOffDis().second > right->GetOffDis().second;
+            }
+        }
+        return left->GetOffDis().first < right->GetOffDis().first;
+    }
+};
+
+class VectorIterator {
+ public:
+    virtual ~VectorIterator() = default;
+
+    virtual bool
+    HasNext() = 0;
+
+    virtual std::optional<std::pair<int64_t, float>>
+    Next() = 0;
+};
+
+// Multi-way merge iterator for vector search results from multiple chunks
+//
+// Merges knowhere iterators from different chunks using a min-heap,
+// returning results in distance-sorted order.
+class ChunkMergeIterator : public VectorIterator {
+ public:
+    ChunkMergeIterator(int chunk_count, bool larger_is_closer = false)
+        : heap_(OffsetDisPairComparator(larger_is_closer)) {
+        iterators_.reserve(chunk_count);
+    }
+
+    bool
+    HasNext() override {
+        return !heap_.empty();
+    }
+
+    std::optional<std::pair<int64_t, float>>
+    Next() override {
+        if (!heap_.empty()) {
+            auto top = heap_.top();
+            heap_.pop();
+            auto& iter = iterators_[top->GetIteratorIdx()];
+            auto has_next = iter->HasNext();
+            AssertInfo(has_next.has_value(),
+                       "knowhere iterator HasNext failed: {}",
+                       has_next.what());
+            if (has_next.value()) {
+                auto origin_pair = iter->Next();
+                AssertInfo(origin_pair.has_value(),
+                           "knowhere iterator Next failed: {}",
+                           origin_pair.what());
+                auto off_dis_pair = std::make_shared<OffsetDisPair>(
+                    origin_pair.value(), top->GetIteratorIdx());
+                heap_.push(off_dis_pair);
+            }
+            return top->GetOffDis();
+        }
+        return std::nullopt;
+    }
+
+    bool
+    AddIterator(knowhere::IndexNode::IteratorPtr iter) {
+        if (!sealed && iter != nullptr) {
+            iterators_.emplace_back(iter);
+            return true;
+        }
+        return false;
+    }
+
+    void
+    seal() {
+        sealed = true;
+        // idx must track each chunk's position in iterators_, because Next()
+        // refills from iterators_[OffsetDisPair::GetIteratorIdx()]. Incrementing
+        // only for non-empty iterators would misalign the index once a leading
+        // iterator is empty (e.g. emptied by a bitset filter), stamping later
+        // chunks with the wrong iterator and silently dropping their remaining
+        // results from the merged top-k.
+        for (int idx = 0; idx < static_cast<int>(iterators_.size()); ++idx) {
+            auto& iter = iterators_[idx];
+            auto has_next = iter->HasNext();
+            AssertInfo(has_next.has_value(),
+                       "knowhere iterator HasNext failed: {}",
+                       has_next.what());
+            if (has_next.value()) {
+                auto origin_pair = iter->Next();
+                AssertInfo(origin_pair.has_value(),
+                           "knowhere iterator Next failed: {}",
+                           origin_pair.what());
+                auto off_dis_pair =
+                    std::make_shared<OffsetDisPair>(origin_pair.value(), idx);
+                heap_.push(off_dis_pair);
+            }
+        }
+    }
+
+ private:
+    std::vector<knowhere::IndexNode::IteratorPtr> iterators_;
+    std::priority_queue<std::shared_ptr<OffsetDisPair>,
+                        std::vector<std::shared_ptr<OffsetDisPair>>,
+                        OffsetDisPairComparator>
+        heap_;
+    bool sealed = false;
+    //currently, ChunkMergeIterator is guaranteed to be used serially without concurrent problem, in the future
+    //we may need to add mutex to protect the variable sealed
+};
+
+struct SearchResult {
+    using FilteredVectorSearchFn =
+        std::function<void(const BitsetView&, int64_t, SearchResult&)>;
+    SearchResult() = default;
+
+    int64_t
+    get_total_result_count() const {
+        if (topk_per_nq_prefix_sum_.empty()) {
+            return 0;
+        }
+        AssertInfo(topk_per_nq_prefix_sum_.size() == total_nq_ + 1,
+                   "wrong topk_per_nq_prefix_sum_ size {}",
+                   topk_per_nq_prefix_sum_.size());
+        return topk_per_nq_prefix_sum_[total_nq_];
+    }
+
+ public:
+    void
+    AssembleChunkVectorIterators(
+        int64_t nq,
+        int chunk_count,
+        const std::vector<knowhere::IndexNode::IteratorPtr>& kw_iterators,
+        bool larger_is_closer = false) {
+        AssertInfo(kw_iterators.size() == nq * chunk_count,
+                   "kw_iterators count:{} is not equal to nq*chunk_count:{}, "
+                   "wrong state",
+                   kw_iterators.size(),
+                   nq * chunk_count);
+        std::vector<std::shared_ptr<VectorIterator>> vector_iterators;
+        vector_iterators.reserve(nq);
+        for (int i = 0, vec_iter_idx = 0; i < kw_iterators.size(); i++) {
+            vec_iter_idx = vec_iter_idx % nq;
+            if (vector_iterators.size() < nq) {
+                auto chunk_merge_iter = std::make_shared<ChunkMergeIterator>(
+                    chunk_count, larger_is_closer);
+                vector_iterators.emplace_back(chunk_merge_iter);
+            }
+            const auto& kw_iterator = kw_iterators[i];
+            auto chunk_merge_iter =
+                std::static_pointer_cast<ChunkMergeIterator>(
+                    vector_iterators[vec_iter_idx++]);
+            chunk_merge_iter->AddIterator(kw_iterator);
+        }
+        for (const auto& vector_iter : vector_iterators) {
+            // Cast to ChunkMergeIterator to call seal
+            auto chunk_merge_iter =
+                std::static_pointer_cast<ChunkMergeIterator>(vector_iter);
+            chunk_merge_iter->seal();
+        }
+        this->vector_iterators_ = vector_iterators;
+    }
+
+    BitsetView
+    PinBitset(TargetBitmap&& bitset) {
+        auto pinned = std::make_unique<TargetBitmap>(std::move(bitset));
+        auto view = BitsetView(*pinned);
+        pinned_bitsets_.emplace_back(std::move(pinned));
+        return view;
+    }
+
+    void
+    SetVectorSearchProvider(const BitsetView& base_filter,
+                            FilteredVectorSearchFn provider) {
+        vector_search_base_filter_.reset();
+        vector_search_base_filter_view_ = base_filter;
+        // The execution pipeline owns its input column. Direct callers without
+        // an owner retain a defensive copy of their filter.
+        if (!vector_search_filter_owner_) {
+            GetVectorSearchBaseFilter();
+        }
+        filtered_vector_search_fn_ = std::move(provider);
+    }
+
+    void
+    ClearVectorSearchProvider() {
+        filtered_vector_search_fn_ = {};
+        vector_search_base_filter_view_ = {};
+        vector_search_base_filter_.reset();
+        vector_search_filter_owner_.reset();
+    }
+
+    const TargetBitmap*
+    GetVectorSearchBaseFilter() {
+        const auto& base_filter = vector_search_base_filter_view_;
+        if (!vector_search_base_filter_ && !base_filter.empty()) {
+            auto copied_filter =
+                std::make_unique<TargetBitmap>(base_filter.size(), false);
+            if (!base_filter.has_out_ids()) {
+                std::memcpy(copied_filter->data(),
+                            base_filter.data(),
+                            base_filter.byte_size());
+            } else {
+                for (size_t i = 0; i < base_filter.size(); ++i) {
+                    (*copied_filter)[i] = base_filter.test(i);
+                }
+            }
+            vector_search_base_filter_ = std::move(copied_filter);
+            vector_search_base_filter_view_ =
+                BitsetView(*vector_search_base_filter_);
+        }
+        return vector_search_base_filter_.get();
+    }
+
+    bool
+    CanSearchFilteredVectors() const {
+        return allow_filtered_vector_search_ &&
+               static_cast<bool>(filtered_vector_search_fn_);
+    }
+
+    // Synchronous ordinary top-k search. Serial callers may reuse the bitmap
+    // after releasing the result; each invocation gets a fresh BitsetView.
+    std::optional<std::unique_ptr<SearchResult>>
+    SearchFilteredVectors(const std::shared_ptr<TargetBitmap>& filter,
+                          int64_t topk) {
+        if (!filter || topk <= 0 || !CanSearchFilteredVectors()) {
+            return std::nullopt;
+        }
+        const auto* base = GetVectorSearchBaseFilter();
+        if (base && base->size() != filter->size()) {
+            return std::nullopt;
+        }
+        if (base) {
+            *filter |= *base;
+        }
+        auto result = std::make_unique<SearchResult>();
+        result->allow_filtered_vector_search_ = false;
+        result->vector_search_filter_owner_ = filter;
+        filtered_vector_search_fn_(BitsetView(*filter), topk, *result);
+        AssertInfo(!result->vector_iterators_.has_value(),
+                   "ordinary filtered search must not return iterators");
+        return result;
+    }
+
+ public:
+    int64_t total_nq_{0};
+    int64_t unity_topK_{0};
+    int64_t total_data_cnt_{0};
+    void* segment_{nullptr};
+
+    // Sealed search requests keep publication blocked until the result is
+    // deleted. Growing search results leave this empty.
+    std::shared_ptr<segcore::SegmentReadLease> read_lease_;
+
+    // Request-pinned sealed read snapshot, captured once while the read lease
+    // is held. Result fill / export reuse it at the fill layer (FillTargetEntry
+    // / bulk_subscript / take) instead of re-capturing the published state per
+    // output field. Deeper column/index helpers (get_raw_data, PinIndex,
+    // HasFieldData, ...) may still self-capture; migrating them is a Phase 4
+    // follow-up. Growing and non-pinned paths leave this empty.
+    std::shared_ptr<const segcore::SegmentReadSnapshot> read_snapshot_;
+
+    // Pins resources whose iterators or offset mappings may outlive the
+    // original search call independently from segment snapshot publication.
+    std::vector<std::shared_ptr<void>> resource_pins_;
+
+    // first fill data during search, and then update data after reducing search results
+    std::vector<float> distances_;
+    std::vector<int64_t> seg_offsets_;
+    std::optional<std::vector<CompositeGroupKey>> composite_group_by_values_;
+    std::optional<int64_t> group_size_;
+
+    bool
+    HasGroupBy() const {
+        return composite_group_by_values_.has_value() &&
+               !composite_group_by_values_->empty();
+    }
+
+    // first fill data during fillPrimaryKey, and then update data after reducing search results
+    std::vector<PkType> primary_keys_;
+    DataType pk_type_;
+
+    // fill data during reducing search result
+    std::vector<int64_t> result_offsets_;
+    // after reducing search result done, size(distances_) = size(seg_offsets_) = size(primary_keys_) =
+    // size(primary_keys_)
+
+    // set output fields data when fill target entity
+    std::map<FieldId, std::unique_ptr<milvus::DataArray>> output_fields_data_;
+
+    // used for reduce, filter invalid pk, get real topks count
+    std::vector<size_t> topk_per_nq_prefix_sum_{};
+
+    //Vector iterators, used for group by
+    std::optional<std::vector<std::shared_ptr<VectorIterator>>>
+        vector_iterators_;
+    // record the storage usage in search
+    StorageCost search_storage_cost_;
+
+    bool element_level_{false};
+    std::vector<int32_t> element_indices_;
+    std::optional<std::vector<std::shared_ptr<VectorIterator>>>
+        element_iterators_;
+    std::shared_ptr<const IArrayOffsets> array_offsets_{nullptr};
+    std::vector<std::unique_ptr<uint8_t[]>> chunk_buffers_{};
+    std::vector<TargetBitmapPtr> pinned_bitsets_{};
+    FilteredVectorSearchFn filtered_vector_search_fn_{};
+    TargetBitmapPtr vector_search_base_filter_{};
+    BitsetView vector_search_base_filter_view_{};
+    std::shared_ptr<const void> vector_search_filter_owner_{};
+    bool allow_filtered_vector_search_{true};
+
+    // For two-stage search: count of rows that pass the filter in this segment
+    // Set to -1 when not applicable (normal search mode)
+    // Each segment's SearchResult has its own valid_count, preserved separately
+    int64_t valid_count_ = -1;
+};
+
+using SearchResultPtr = std::shared_ptr<SearchResult>;
+using SearchResultOpt = std::optional<SearchResult>;
+
+struct RetrieveResult {
+    RetrieveResult() = default;
+
+ public:
+    int64_t total_data_cnt_;
+    void* segment_;
+    std::vector<int64_t> result_offsets_;
+    std::vector<DataArray> field_data_;
+    bool has_more_result = true;
+    // record the storage usage in retrieve
+    StorageCost retrieve_storage_cost_;
+
+    // Element-level query support
+    // When element_level_ is true:
+    //   - result_offsets_ contains unique doc_ids (no duplicates)
+    //   - element_indices_[i] contains all matching element indices for result_offsets_[i]
+    bool element_level_{false};
+    std::vector<std::vector<int32_t>> element_indices_;
+};
+
+using RetrieveResultPtr = std::shared_ptr<RetrieveResult>;
+using RetrieveResultOpt = std::optional<RetrieveResult>;
+}  // namespace milvus

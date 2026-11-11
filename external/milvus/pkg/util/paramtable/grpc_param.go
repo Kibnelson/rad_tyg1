@@ -1,0 +1,802 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package paramtable
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
+
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+)
+
+const (
+	// DefaultServerMaxSendSize defines the maximum size of data per grpc request can send by server side.
+	DefaultServerMaxSendSize = 512 * 1024 * 1024
+
+	// DefaultServerMaxRecvSize defines the maximum size of data per grpc request can receive by server side.
+	DefaultServerMaxRecvSize = 256 * 1024 * 1024
+
+	// DefaultClientMaxSendSize defines the maximum size of data per grpc request can send by client side.
+	DefaultClientMaxSendSize = 256 * 1024 * 1024
+
+	// DefaultClientMaxRecvSize defines the maximum size of data per grpc request can receive by client side.
+	DefaultClientMaxRecvSize = 512 * 1024 * 1024
+
+	// DefaultLogLevel defines the log level of grpc
+	DefaultLogLevel = "WARNING"
+
+	// Grpc Timeout related configs
+	DefaultDialTimeout      = 200
+	DefaultKeepAliveTime    = 10000
+	DefaultKeepAliveTimeout = 20000
+
+	// Grpc retry policy
+	DefaultMaxAttempts                = 10
+	DefaultInitialBackoff     float64 = 0.2
+	DefaultMaxBackoff         float64 = 10
+	DefaultCompressionEnabled bool    = false
+
+	// DefaultCompressionLevel is the default zstd compression tier, matching the
+	// previous behavior of zstd.NewWriter(nil) (SpeedDefault, ~zstd level 3).
+	DefaultCompressionLevel = "default"
+
+	// DefaultCompressionAlgorithm is the default gRPC compression algorithm.
+	DefaultCompressionAlgorithm = "zstd"
+
+	// DefaultCompressionConcurrency is the default size of the zstd state pool,
+	// expressed as a multiple of GOMAXPROCS. A caller that finds the pool empty
+	// blocks, so it is slightly larger than the core count.
+	DefaultCompressionConcurrency = 2
+
+	// MaxCompressionConcurrency bounds the multiplier, not the pool it produces:
+	// the pools are sized multiplier x GOMAXPROCS, so this only rejects a
+	// mistyped config, and a large host still scales past it. Compression is
+	// CPU-bound and runs inline on the gRPC goroutine, so more than a few times
+	// the core count buys queueing rather than throughput, while every extra
+	// slot is a zstd encoder state (~3.6MB at the default level) plus a codec
+	// writer and reader.
+	MaxCompressionConcurrency = 8
+
+	// DefaultCompressionCRC controls whether the zstd encoder embeds a
+	// per-frame checksum. It defaults to false: the checksum costs throughput on
+	// every message, while corruption on an internal TCP link is already caught
+	// by the TCP checksum and, in practice, by zstd's own entropy decoding, which
+	// rejects a damaged frame rather than returning garbage. Turn it on where a
+	// verified end-to-end integrity check on the payload is worth the cost.
+	DefaultCompressionCRC bool = false
+
+	ProxyInternalPort = 19529
+	ProxyExternalPort = 19530
+)
+
+// /////////////////////////////////////////////////////////////////////////////
+// --- grpc ---
+type grpcConfig struct {
+	Domain        string    `refreshable:"false"`
+	IP            string    `refreshable:"false"`
+	TLSMode       ParamItem `refreshable:"false"`
+	IPItem        ParamItem `refreshable:"false"`
+	Port          ParamItem `refreshable:"false"`
+	InternalPort  ParamItem `refreshable:"false"`
+	ServerPemPath ParamItem `refreshable:"false"`
+	ServerKeyPath ParamItem `refreshable:"false"`
+	CaPemPath     ParamItem `refreshable:"false"`
+
+	base *BaseTable // stored for dynamic per-cluster TLS lookups
+}
+
+func (p *grpcConfig) init(domain string, base *BaseTable) {
+	p.Domain = domain
+	p.base = base
+	p.IPItem = ParamItem{
+		Key:         p.Domain + ".ip",
+		Version:     "2.3.3",
+		Doc:         "TCP/IP address of " + p.Domain + ". If not specified, use the first unicastable address",
+		Export:      true,
+		Sensitivity: Sensitive,
+	}
+	p.IPItem.Init(base.mgr)
+	p.IP = funcutil.GetIP(p.IPItem.GetValue())
+
+	p.Port = ParamItem{
+		Key:          p.Domain + ".port",
+		Version:      "2.0.0",
+		DefaultValue: strconv.FormatInt(ProxyExternalPort, 10),
+		Doc:          "TCP port of " + p.Domain,
+		Export:       true,
+		Sensitivity:  Sensitive,
+	}
+	p.Port.Init(base.mgr)
+
+	p.InternalPort = ParamItem{
+		Key:          p.Domain + ".internalPort",
+		Version:      "2.0.0",
+		DefaultValue: strconv.FormatInt(ProxyInternalPort, 10),
+		Sensitivity:  Sensitive,
+	}
+	p.InternalPort.Init(base.mgr)
+
+	p.TLSMode = ParamItem{
+		Key:          "common.security.tlsMode",
+		Version:      "2.0.0",
+		DefaultValue: "0",
+		Export:       true,
+		Sensitivity:  Sensitive,
+	}
+	p.TLSMode.Init(base.mgr)
+
+	p.ServerPemPath = ParamItem{
+		Key:         "tls.serverPemPath",
+		Sensitivity: Sensitive,
+		Version:     "2.0.0",
+		Export:      true,
+	}
+	p.ServerPemPath.Init(base.mgr)
+
+	p.ServerKeyPath = ParamItem{
+		Key:         "tls.serverKeyPath",
+		Sensitivity: Sensitive,
+		Version:     "2.0.0",
+		Export:      true,
+	}
+	p.ServerKeyPath.Init(base.mgr)
+
+	p.CaPemPath = ParamItem{
+		Key:         "tls.caPemPath",
+		Sensitivity: Sensitive,
+		Version:     "2.0.0",
+		Export:      true,
+	}
+	p.CaPemPath.Init(base.mgr)
+
+	// The per-cluster CDC namespaces are keyed by cluster ID and read by exact
+	// key through base.Get, not as a group — GetClusterTLSConfig and
+	// GetClusterAuthority below. Declaring them makes the namespaces visible
+	// to configuration projections and management GET, with sensitive values
+	// redacted. Registration does not restrict management SET or DELETE.
+	//
+	// Registered directly rather than through a ParamGroup field: a field would
+	// buy a GetValue nothing calls, and grpcConfig is embedded in fifteen
+	// server and client configs, so it would buy thirty of them.
+	//
+	base.mgr.RegisterSensitivePrefix("tls.clusters.")
+	base.mgr.RegisterSensitivePrefix("grpc.clusters.")
+	base.mgr.RegisterConfigPrefix("tls.clusters.")
+	base.mgr.RegisterConfigPrefix("grpc.clusters.")
+}
+
+// GetClusterTLSConfig returns per-cluster outbound TLS cert paths for CDC connections.
+// Reads from tls.clusters.<clusterID>.{caPemPath,clientPemPath,clientKeyPath}.
+// Returns empty strings if the cluster has no TLS config.
+func (p *grpcConfig) GetClusterTLSConfig(clusterID string) (caPemPath, clientPemPath, clientKeyPath string) {
+	prefix := "tls.clusters." + clusterID + "."
+	caPemPath = p.base.Get(prefix + "caPemPath")
+	clientPemPath = p.base.Get(prefix + "clientPemPath")
+	clientKeyPath = p.base.Get(prefix + "clientKeyPath")
+	return
+}
+
+// GetClusterAuthority returns the gRPC :authority header for CDC outbound connections.
+// Reads from grpc.clusters.<clusterID>.authority.
+// Returns empty string if not configured.
+func (p *grpcConfig) GetClusterAuthority(clusterID string) string {
+	return p.base.Get("grpc.clusters." + clusterID + ".authority")
+}
+
+// GetAddress return grpc address
+func (p *grpcConfig) GetAddress() string {
+	return p.IP + ":" + p.Port.GetValue()
+}
+
+func (p *grpcConfig) GetInternalAddress() string {
+	return p.IP + ":" + p.InternalPort.GetValue()
+}
+
+// GrpcServerConfig is configuration for grpc server.
+type GrpcServerConfig struct {
+	grpcConfig
+
+	ServerMaxSendSize ParamItem `refreshable:"false"`
+	ServerMaxRecvSize ParamItem `refreshable:"false"`
+
+	GracefulStopTimeout ParamItem `refreshable:"true"`
+}
+
+func (p *GrpcServerConfig) Init(domain string, base *BaseTable) {
+	p.init(domain, base)
+
+	maxSendSize := strconv.FormatInt(DefaultServerMaxSendSize, 10)
+	p.ServerMaxSendSize = ParamItem{
+		Key:          p.Domain + ".grpc.serverMaxSendSize",
+		DefaultValue: maxSendSize,
+		FallbackKeys: []string{"grpc.serverMaxSendSize"},
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxSendSize
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.serverMaxSendSize, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.serverMaxSendSize", v),
+					mlog.Err(err))
+				return maxSendSize
+			}
+			return v
+		},
+		Doc:    "The maximum size of each RPC request that the " + domain + " can send, unit: byte",
+		Export: true,
+	}
+	p.ServerMaxSendSize.Init(base.mgr)
+
+	maxRecvSize := strconv.FormatInt(DefaultServerMaxRecvSize, 10)
+	p.ServerMaxRecvSize = ParamItem{
+		Key:          p.Domain + ".grpc.serverMaxRecvSize",
+		DefaultValue: maxRecvSize,
+		FallbackKeys: []string{"grpc.serverMaxRecvSize"},
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxRecvSize
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.serverMaxRecvSize, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.serverMaxRecvSize", v),
+					mlog.Err(err))
+				return maxRecvSize
+			}
+			return v
+		},
+		Doc:    "The maximum size of each RPC request that the " + domain + " can receive, unit: byte",
+		Export: true,
+	}
+	p.ServerMaxRecvSize.Init(base.mgr)
+
+	p.GracefulStopTimeout = ParamItem{
+		Key:          "grpc.gracefulStopTimeout",
+		Version:      "2.3.1",
+		DefaultValue: "3",
+		Doc:          "second, time to wait graceful stop finish",
+		Export:       true,
+	}
+	p.GracefulStopTimeout.Init(base.mgr)
+}
+
+// GrpcClientConfig is configuration for grpc client.
+type GrpcClientConfig struct {
+	grpcConfig
+
+	CompressionEnabled ParamItem `refreshable:"false"`
+
+	CompressionLevel       ParamItem `refreshable:"false"`
+	CompressionAlgorithm   ParamItem `refreshable:"false"`
+	CompressionCRC         ParamItem `refreshable:"false"`
+	CompressionConcurrency ParamItem `refreshable:"false"`
+
+	ClientMaxSendSize ParamItem `refreshable:"false"`
+	ClientMaxRecvSize ParamItem `refreshable:"false"`
+
+	DialTimeout      ParamItem `refreshable:"false"`
+	KeepAliveTime    ParamItem `refreshable:"false"`
+	KeepAliveTimeout ParamItem `refreshable:"false"`
+
+	MaxAttempts             ParamItem `refreshable:"false"`
+	InitialBackoff          ParamItem `refreshable:"false"`
+	MaxBackoff              ParamItem `refreshable:"false"`
+	BackoffMultiplier       ParamItem `refreshable:"false"`
+	MinResetInterval        ParamItem `refreshable:"false"`
+	MaxCancelError          ParamItem `refreshable:"false"`
+	MinSessionCheckInterval ParamItem `refreshable:"false"`
+}
+
+func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
+	p.init(domain, base)
+
+	maxSendSize := strconv.FormatInt(DefaultClientMaxSendSize, 10)
+	p.ClientMaxSendSize = ParamItem{
+		Key:          p.Domain + ".grpc.clientMaxSendSize",
+		DefaultValue: maxSendSize,
+		FallbackKeys: []string{"grpc.clientMaxSendSize"},
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxSendSize
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.clientMaxSendSize, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.clientMaxSendSize", v),
+					mlog.Err(err))
+				return maxSendSize
+			}
+			return v
+		},
+		Doc:    "The maximum size of each RPC request that the clients on " + domain + " can send, unit: byte",
+		Export: true,
+	}
+	p.ClientMaxSendSize.Init(base.mgr)
+
+	maxRecvSize := strconv.FormatInt(DefaultClientMaxRecvSize, 10)
+	p.ClientMaxRecvSize = ParamItem{
+		Key:          p.Domain + ".grpc.clientMaxRecvSize",
+		DefaultValue: maxRecvSize,
+		FallbackKeys: []string{"grpc.clientMaxRecvSize"},
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxRecvSize
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.clientMaxRecvSize, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.clientMaxRecvSize", v),
+					mlog.Err(err))
+				return maxRecvSize
+			}
+			return v
+		},
+		Doc:    "The maximum size of each RPC request that the clients on " + domain + " can receive, unit: byte",
+		Export: true,
+	}
+	p.ClientMaxRecvSize.Init(base.mgr)
+
+	dialTimeout := strconv.FormatInt(DefaultDialTimeout, 10)
+	p.DialTimeout = ParamItem{
+		Key:     "grpc.client.dialTimeout",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return dialTimeout
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.dialTimeout, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.dialTimeout", v))
+				return dialTimeout
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.DialTimeout.Init(base.mgr)
+
+	keepAliveTimeout := strconv.FormatInt(DefaultKeepAliveTimeout, 10)
+	p.KeepAliveTimeout = ParamItem{
+		Key:     "grpc.client.keepAliveTimeout",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return keepAliveTimeout
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.keepAliveTimeout, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.keepAliveTimeout", v))
+				return keepAliveTimeout
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.KeepAliveTimeout.Init(base.mgr)
+
+	keepAliveTime := strconv.FormatInt(DefaultKeepAliveTime, 10)
+	p.KeepAliveTime = ParamItem{
+		Key:     "grpc.client.keepAliveTime",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return keepAliveTime
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.keepAliveTime, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.keepAliveTime", v))
+				return keepAliveTime
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.KeepAliveTime.Init(base.mgr)
+
+	maxAttempts := strconv.FormatInt(DefaultMaxAttempts, 10)
+	p.MaxAttempts = ParamItem{
+		Key:     "grpc.client.maxMaxAttempts",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxAttempts
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.maxMaxAttempts, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.maxMaxAttempts", v))
+				return maxAttempts
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MaxAttempts.Init(base.mgr)
+
+	initialBackoff := fmt.Sprintf("%f", DefaultInitialBackoff)
+	p.InitialBackoff = ParamItem{
+		Key:     "grpc.client.initialBackoff",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return initialBackoff
+			}
+			_, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.initialBackoff, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.initialBackoff", v))
+				return initialBackoff
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.InitialBackoff.Init(base.mgr)
+
+	maxBackoff := fmt.Sprintf("%f", DefaultMaxBackoff)
+	p.MaxBackoff = ParamItem{
+		Key:     "grpc.client.maxBackoff",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return maxBackoff
+			}
+			_, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.maxBackoff, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.maxBackoff", v))
+				return maxBackoff
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MaxBackoff.Init(base.mgr)
+
+	p.BackoffMultiplier = ParamItem{
+		Key:          "grpc.client.backoffMultiplier",
+		Version:      "2.5.0",
+		DefaultValue: "2.0",
+		Export:       true,
+	}
+	p.BackoffMultiplier.Init(base.mgr)
+
+	compressionEnabled := fmt.Sprintf("%t", DefaultCompressionEnabled)
+	p.CompressionEnabled = ParamItem{
+		Key:     "grpc.client.compressionEnabled",
+		Version: "2.0.0",
+		Formatter: func(v string) string {
+			if v == "" {
+				return compressionEnabled
+			}
+			_, err := strconv.ParseBool(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to convert int when parsing grpc.client.compressionEnabled, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.compressionEnabled", v))
+				return compressionEnabled
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.CompressionEnabled.Init(base.mgr)
+
+	p.CompressionLevel = ParamItem{
+		Key:          "grpc.client.compressionLevel",
+		Version:      "3.0.1",
+		DefaultValue: DefaultCompressionLevel,
+		Formatter: func(v string) string {
+			if v == "" {
+				return DefaultCompressionLevel
+			}
+			normalized := strings.ToLower(v)
+			switch normalized {
+			case "fastest", "default", "better", "best":
+				return normalized
+			default:
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.compressionLevel, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.compressionLevel", v))
+				return DefaultCompressionLevel
+			}
+		},
+		Doc: `The compression tier for gRPC messages: fastest, default, better, best.
+snappy and s2 have three tiers rather than four, so fastest and default behave identically for them.`,
+		Export: true,
+	}
+	p.CompressionLevel.Init(base.mgr)
+
+	p.CompressionAlgorithm = ParamItem{
+		Key:          "grpc.client.compressionAlgorithm",
+		Version:      "3.0.1",
+		DefaultValue: DefaultCompressionAlgorithm,
+		Formatter: func(v string) string {
+			if v == "" {
+				return DefaultCompressionAlgorithm
+			}
+			normalized := strings.ToLower(v)
+			switch normalized {
+			case "zstd", "snappy", "s2":
+				return normalized
+			default:
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.compressionAlgorithm, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.compressionAlgorithm", v))
+				return DefaultCompressionAlgorithm
+			}
+		},
+		Doc: `The gRPC compression algorithm: zstd, snappy, or s2.
+Only zstd is understood by every Milvus version. A node that has not been upgraded yet has no snappy or s2 decompressor
+and rejects those encodings, failing every RPC sent to it, and there is no automatic fallback.
+Change this only after every node in the cluster has been upgraded.`,
+		Export: true,
+	}
+	p.CompressionAlgorithm.Init(base.mgr)
+
+	compressionCRC := fmt.Sprintf("%t", DefaultCompressionCRC)
+	p.CompressionCRC = ParamItem{
+		Key:          "grpc.client.compressionCRC",
+		Version:      "3.0.1",
+		DefaultValue: compressionCRC,
+		Formatter: func(v string) string {
+			if v == "" {
+				return compressionCRC
+			}
+			_, err := strconv.ParseBool(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.compressionCRC, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.compressionCRC", v))
+				return compressionCRC
+			}
+			return strings.ToLower(v)
+		},
+		Doc: `Whether the zstd encoder embeds a per-frame checksum. Off by default: it costs throughput on every message,
+while TCP already checksums the link and zstd's entropy decoding rejects a damaged frame rather than
+returning garbage. Turn it on where a verified end-to-end integrity check on the payload is worth the cost.
+Frames a peer wrote with a checksum are still verified either way.`,
+		Export: true,
+	}
+	p.CompressionCRC.Init(base.mgr)
+
+	compressionConcurrency := strconv.Itoa(DefaultCompressionConcurrency)
+	p.CompressionConcurrency = ParamItem{
+		Key:          "grpc.client.compressionConcurrency",
+		Version:      "3.0.1",
+		DefaultValue: compressionConcurrency,
+		Formatter: func(v string) string {
+			if v == "" {
+				return compressionConcurrency
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > MaxCompressionConcurrency {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.compressionConcurrency, set to default",
+					mlog.String("role", p.Domain),
+					mlog.String("grpc.client.compressionConcurrency", v))
+				return compressionConcurrency
+			}
+			return v
+		},
+		Doc: `Size of the zstd encoder state pool, as a multiple of GOMAXPROCS (default 2). It also sizes the free
+lists every codec parks its per-message writers and readers in, so it is the one ceiling on how much
+memory compression holds.
+Compression always runs inline on the gRPC goroutine handling the RPC; this is not a thread count.
+For the zstd encoder it is the ceiling on how many RPCs may compress at the same time: once every state is
+borrowed, further callers block until one is returned, so too small a pool costs throughput under load.
+Decoding does not draw on it -- an inbound message takes a pooled streaming decoder instead.
+The encoder pool is allocated on the first message this process compresses -- nothing at startup, then all of
+it at once -- and costs this value x GOMAXPROCS x the per-state size: roughly 2.6MB at fastest, 3.6MB at
+default, 6.5MB at better and 36MB at best. Most of a state is its history buffer, which is only allocated
+once that state sees a message above 128KB, so RSS reaches that figure in two steps.
+Raising this at a high compressionLevel is therefore expensive.`,
+		Export: true,
+	}
+	p.CompressionConcurrency.Init(base.mgr)
+
+	p.MinResetInterval = ParamItem{
+		Key:          "grpc.client.minResetInterval",
+		DefaultValue: "1000",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "1000"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.minResetInterval, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.client.minResetInterval", v),
+					mlog.Err(err))
+				return "1000"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MinResetInterval.Init(base.mgr)
+
+	p.MinSessionCheckInterval = ParamItem{
+		Key:          "grpc.client.minSessionCheckInterval",
+		DefaultValue: "200",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "200"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.minSessionCheckInterval, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.client.minSessionCheckInterval", v),
+					mlog.Err(err))
+				return "200"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MinSessionCheckInterval.Init(base.mgr)
+
+	p.MaxCancelError = ParamItem{
+		Key:          "grpc.client.maxCancelError",
+		DefaultValue: "32",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "32"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				mlog.Warn(context.TODO(), "Failed to parse grpc.client.maxCancelError, set to default",
+					mlog.String("role", p.Domain), mlog.String("grpc.client.maxCancelError", v),
+					mlog.Err(err))
+				return "32"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MaxCancelError.Init(base.mgr)
+}
+
+// GetDialOptionsFromConfig returns grpc dial options from config.
+func (p *GrpcClientConfig) GetDialOptionsFromConfig() []grpc.DialOption {
+	compress := ""
+	if p.CompressionEnabled.GetAsBool() {
+		// Pinned to zstd on purpose. This dial path is used by the streaming
+		// clients, which do not go through grpcclient.ClientBase and therefore
+		// have no way to detect a peer that cannot decode snappy/s2 and retry
+		// on a downgraded connection. zstd is decodable by every version that
+		// supports compression at all, so it is the only algorithm that is safe
+		// here during a rolling upgrade.
+		compress = DefaultCompressionAlgorithm
+	}
+	return []grpc.DialOption{
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(p.ClientMaxRecvSize.GetAsInt()),
+			grpc.MaxCallSendMsgSize(p.ClientMaxSendSize.GetAsInt()),
+			grpc.UseCompressor(compress),
+		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                p.KeepAliveTime.GetAsDuration(time.Millisecond),
+			Timeout:             p.KeepAliveTimeout.GetAsDuration(time.Millisecond),
+			PermitWithoutStream: true,
+		}),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  100 * time.Millisecond,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   3 * time.Second,
+			},
+			MinConnectTimeout: p.DialTimeout.GetAsDuration(time.Millisecond),
+		}),
+	}
+}
+
+// GetDefaultRetryPolicy returns default grpc retry policy.
+func (p *GrpcClientConfig) GetDefaultRetryPolicy() map[string]interface{} {
+	return map[string]interface{}{
+		"maxAttempts":       p.MaxAttempts.GetAsInt(),
+		"initialBackoff":    fmt.Sprintf("%fs", p.InitialBackoff.GetAsFloat()),
+		"maxBackoff":        fmt.Sprintf("%fs", p.MaxBackoff.GetAsFloat()),
+		"backoffMultiplier": p.BackoffMultiplier.GetAsFloat(),
+	}
+}
+
+type InternalTLSConfig struct {
+	InternalTLSEnabled       ParamItem `refreshable:"false"`
+	InternalTLSServerPemPath ParamItem `refreshable:"false"`
+	InternalTLSServerKeyPath ParamItem `refreshable:"false"`
+	InternalTLSCaPemPath     ParamItem `refreshable:"false"`
+	InternalTLSSNI           ParamItem `refreshable:"false"`
+}
+
+func (p *InternalTLSConfig) Init(base *BaseTable) {
+	p.InternalTLSEnabled = ParamItem{
+		Key:          "common.security.internaltlsEnabled",
+		Version:      "2.5.0",
+		DefaultValue: "false",
+		Export:       true,
+		Sensitivity:  Sensitive,
+	}
+	p.InternalTLSEnabled.Init(base.mgr)
+
+	p.InternalTLSServerPemPath = ParamItem{
+		Key:         "internaltls.serverPemPath",
+		Sensitivity: Sensitive,
+		Version:     "2.5.0",
+		Export:      true,
+	}
+	p.InternalTLSServerPemPath.Init(base.mgr)
+
+	p.InternalTLSServerKeyPath = ParamItem{
+		Key:         "internaltls.serverKeyPath",
+		Sensitivity: Sensitive,
+		Version:     "2.5.0",
+		Export:      true,
+	}
+	p.InternalTLSServerKeyPath.Init(base.mgr)
+
+	p.InternalTLSCaPemPath = ParamItem{
+		Key:         "internaltls.caPemPath",
+		Sensitivity: Sensitive,
+		Version:     "2.5.0",
+		Export:      true,
+	}
+	p.InternalTLSCaPemPath.Init(base.mgr)
+
+	p.InternalTLSSNI = ParamItem{
+		Key:         "internaltls.sni",
+		Sensitivity: Sensitive,
+		Version:     "2.5.0",
+		Export:      true,
+		Doc:         "The server name indication (SNI) for internal TLS, should be the same as the name provided by the certificates ref: https://en.wikipedia.org/wiki/Server_Name_Indication",
+	}
+	p.InternalTLSSNI.Init(base.mgr)
+}
+
+func (p *InternalTLSConfig) GetClientCreds(ctx context.Context) (credentials.TransportCredentials, error) {
+	if !p.InternalTLSEnabled.GetAsBool() {
+		return insecure.NewCredentials(), nil
+	}
+	caPemPath := p.InternalTLSCaPemPath.GetValue()
+	sni := p.InternalTLSSNI.GetValue()
+	creds, err := credentials.NewClientTLSFromFile(caPemPath, sni)
+	if err != nil {
+		mlog.Error(ctx, "Failed to create internal TLS credentials", mlog.Err(err))
+		return nil, merr.Wrap(err, "failed to create internal TLS credentials")
+	}
+	return creds, nil
+}

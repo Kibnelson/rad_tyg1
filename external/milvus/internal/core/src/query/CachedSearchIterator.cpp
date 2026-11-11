@@ -1,0 +1,517 @@
+// Copyright (C) 2019-2024 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#include <math.h>
+#include <algorithm>
+#include <exception>
+#include <iterator>
+#include <memory>
+
+#include "common/Consts.h"
+#include "common/EasyAssert.h"
+#include "common/FastMem.h"
+#include "common/QueryInfo.h"
+#include "common/QueryResult.h"
+#include "common/Utils.h"
+#include "common/VectorArray.h"
+#include "index/Utils.h"
+#include "index/VectorIndex.h"
+#include "knowhere/expected.h"
+#include "mmap/ChunkedColumnInterface.h"
+#include "nlohmann/json.hpp"
+#include "query/CachedSearchIterator.h"
+#include "query/SearchBruteForce.h"
+#include "query/Utils.h"
+#include "query/helper.h"
+#include "segcore/ConcurrentVector.h"
+
+namespace milvus::query {
+
+// For sealed segment with vector index
+CachedSearchIterator::CachedSearchIterator(
+    const milvus::index::VectorIndex& index,
+    const knowhere::DataSetPtr& query_ds,
+    const SearchInfo& search_info,
+    const BitsetView& bitset,
+    milvus::OpContext* op_context) {
+    if (query_ds == nullptr) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Query dataset is nullptr, cannot initialize iterator");
+    }
+    auto offsets =
+        query_ds->Get<const size_t*>(knowhere::meta::EMB_LIST_OFFSET);
+    if (offsets != nullptr) {
+        nq_ = query_ds->Get<int64_t>(knowhere::meta::NQ);
+        AssertInfo(nq_ > 0, "embedding list query count is missing");
+        auto total_vectors = static_cast<size_t>(query_ds->GetRows());
+        AssertInfo(offsets[nq_] == total_vectors,
+                   "embedding list query offsets are inconsistent with "
+                   "flattened rows: nq={}, terminal_offset={}, rows={}",
+                   nq_,
+                   offsets[nq_],
+                   total_vectors);
+    } else {
+        nq_ = query_ds->GetRows();
+    }
+    Init(search_info);
+
+    auto search_json = index.PrepareSearchParams(search_info);
+    index::CheckAndUpdateKnowhereRangeSearchParam(
+        search_info, batch_size_, index.GetMetricType(), search_json);
+
+    auto expected_iterators =
+        index.VectorIterators(query_ds, search_json, bitset, op_context);
+    if (expected_iterators.has_value()) {
+        iterators_ = std::move(expected_iterators.value());
+    } else {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Failed to create iterators from index");
+    }
+}
+
+void
+CachedSearchIterator::AppendChunkIterators(
+    const dataset::SearchDataset& query_ds,
+    const SearchInfo& search_info,
+    const std::map<std::string, std::string>& index_info,
+    const dataset::RawDataset& raw_data,
+    const BitsetView& bitset,
+    const milvus::DataType& data_type) {
+    auto expected_iterators = GetBruteForceSearchIterators(
+        query_ds, raw_data, search_info, index_info, bitset, data_type);
+    if (expected_iterators.has_value()) {
+        auto& chunk_iterators = expected_iterators.value();
+        iterators_.insert(iterators_.end(),
+                          std::make_move_iterator(chunk_iterators.begin()),
+                          std::make_move_iterator(chunk_iterators.end()));
+        ++num_chunks_;
+        return;
+    }
+    ThrowInfo(ErrorCode::UnexpectedError,
+              "Failed to create iterators from index");
+}
+
+void
+CachedSearchIterator::InitializeChunkedIterators(
+    const dataset::SearchDataset& query_ds,
+    const SearchInfo& search_info,
+    const std::map<std::string, std::string>& index_info,
+    const BitsetView& bitset,
+    const milvus::DataType& data_type,
+    const GetChunkDataFunc& get_chunk_data) {
+    int64_t offset = 0;
+    chunked_heaps_.resize(nq_);
+    const auto source_chunks = num_chunks_;
+    num_chunks_ = 0;
+    for (int64_t chunk_id = 0; chunk_id < static_cast<int64_t>(source_chunks);
+         ++chunk_id) {
+        auto chunk = get_chunk_data(chunk_id, offset);
+        AppendChunkIterators(query_ds,
+                             search_info,
+                             index_info,
+                             chunk.raw_data,
+                             chunk.bitset,
+                             data_type);
+        offset += chunk.raw_data.num_raw_data;
+    }
+}
+
+// For growing segment with chunked data, BF
+CachedSearchIterator::CachedSearchIterator(
+    const dataset::SearchDataset& query_ds,
+    const segcore::VectorBase* vec_data,
+    const ChunkSnapshot& chunks,
+    const int64_t row_count,
+    const SearchInfo& search_info,
+    const std::map<std::string, std::string>& index_info,
+    const BitsetView& bitset,
+    const milvus::DataType& data_type) {
+    if (vec_data == nullptr) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Vector data is nullptr, cannot initialize iterator");
+    }
+
+    if (row_count <= 0) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Number of rows is 0, cannot initialize iterator");
+    }
+
+    const int64_t vec_size_per_chunk = vec_data->get_size_per_chunk();
+    const int64_t source_chunks = upper_div(row_count, vec_size_per_chunk);
+    nq_ = query_ds.num_queries;
+    Init(search_info);
+
+    // VECTOR_ARRAY element-level search: growing stores each row as a
+    // separate VectorArray with its own backing allocation, so we must
+    // flatten per-chunk into a contiguous buffer that knowhere can read.
+    // array_offsets_ != nullptr is the element-level signal (multi-search-
+    // multi emb-list iterator is rejected upstream, so we don't branch on
+    // it here).
+    const bool is_element_level = search_info.array_offsets_ != nullptr;
+    if (is_element_level) {
+        chunk_buffers_.reserve(source_chunks);
+    }
+
+    iterators_.reserve(nq_ * source_chunks);
+    chunked_heaps_.resize(nq_);
+    num_chunks_ = 0;
+    const auto& offset_mapping = vec_data->get_offset_mapping();
+    const bool has_offset_mapping = offset_mapping.IsEnabled() &&
+                                    !is_element_level &&
+                                    data_type != DataType::VECTOR_ARRAY;
+    int64_t element_offset = 0;
+
+    for (int64_t chunk_id = 0; chunk_id < source_chunks; ++chunk_id) {
+        // Read through the caller's snapshot, not the live container: the
+        // generation behind `chunks` is pinned and cannot be reclaimed under
+        // us. There is no PinWrapper here (unlike the sealed path) because the
+        // snapshot itself is the pin, and the caller holds it for at least as
+        // long as this iterator lives.
+        const void* chunk_data = vec_data->get_chunk_data(chunks, chunk_id);
+        const int64_t row_begin = chunk_id * vec_size_per_chunk;
+        const int64_t row_end =
+            std::min(row_count, (chunk_id + 1) * vec_size_per_chunk);
+        auto range_begin = row_begin;
+        while (range_begin < row_end) {
+            int64_t chunk_size = row_end - range_begin;
+            const void* range_data = chunk_data;
+            OffsetMappingIdView id_view;
+            if (has_offset_mapping) {
+                id_view = offset_mapping.GetPhysicalToLogicalIds(range_begin,
+                                                                 chunk_size);
+                AssertInfo(!id_view.empty(),
+                           "empty id map view for non-empty BF iterator range");
+                chunk_size = id_view.count;
+                range_data = AdvanceVectorDataPointer(chunk_data,
+                                                      data_type,
+                                                      query_ds.dim,
+                                                      range_begin - row_begin);
+            }
+            auto chunk_bitset = AttachOffsetMappingIds(bitset, id_view);
+
+            dataset::RawDataset raw_data;
+            if (!is_element_level) {
+                raw_data = {range_begin, query_ds.dim, chunk_size, range_data};
+            } else {
+                auto va_ptr = reinterpret_cast<const VectorArray*>(range_data);
+                int64_t total_bytes = 0;
+                int64_t total_elements = 0;
+                for (int64_t i = 0; i < chunk_size; ++i) {
+                    total_bytes += va_ptr[i].byte_size();
+                    total_elements += va_ptr[i].physical_length();
+                }
+                auto buf = std::make_unique<uint8_t[]>(total_bytes);
+                auto* ptr = buf.get();
+                for (int64_t i = 0; i < chunk_size; ++i) {
+                    milvus::fastmem::FastMemcpy(
+                        ptr, va_ptr[i].data(), va_ptr[i].byte_size());
+                    ptr += va_ptr[i].byte_size();
+                }
+                const void* flat_data = buf.get();
+                chunk_buffers_.emplace_back(std::move(buf));
+                raw_data = {
+                    element_offset, query_ds.dim, total_elements, flat_data};
+                element_offset += total_elements;
+            }
+            AppendChunkIterators(query_ds,
+                                 search_info,
+                                 index_info,
+                                 raw_data,
+                                 chunk_bitset,
+                                 data_type);
+            range_begin += chunk_size;
+        }
+    }
+}
+
+// For sealed segment with chunked data, BF
+CachedSearchIterator::CachedSearchIterator(
+    ChunkedColumnInterface* column,
+    const dataset::SearchDataset& query_ds,
+    const SearchInfo& search_info,
+    const std::map<std::string, std::string>& index_info,
+    const BitsetView& bitset,
+    const milvus::DataType& data_type) {
+    if (column == nullptr) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Column is nullptr, cannot initialize iterator");
+    }
+
+    num_chunks_ = column->num_chunks();
+    nq_ = query_ds.num_queries;
+    Init(search_info);
+
+    iterators_.reserve(nq_ * num_chunks_);
+    pin_wrappers_.reserve(num_chunks_);
+
+    InitializeChunkedIterators(
+        query_ds,
+        search_info,
+        index_info,
+        bitset,
+        data_type,
+        [this, column, &query_ds, &search_info, &bitset](
+            int64_t chunk_id, int64_t physical_begin) {
+            auto pw = column->DataOfChunk(nullptr, chunk_id)
+                          .transform<const void*>([](const auto& x) {
+                              return static_cast<const void*>(x);
+                          });
+            int64_t chunk_size = column->chunk_row_nums(chunk_id);
+            const auto& offset_mapping = column->GetOffsetMapping();
+            const bool has_offset_mapping =
+                offset_mapping.IsEnabled() &&
+                search_info.array_offsets_ == nullptr;
+            if (has_offset_mapping) {
+                chunk_size = column->GetValidCountInChunk(chunk_id);
+            }
+            // For element-level search on vector array field, chunk_size
+            // must be the element count in this chunk, not the row count.
+            if (search_info.array_offsets_ != nullptr) {
+                auto elem_offsets_pw =
+                    column->VectorArrayOffsets(nullptr, chunk_id);
+                chunk_size = elem_offsets_pw.get()[chunk_size];
+            }
+            // pw guarantees chunk_data is kept alive.
+            auto chunk_data = pw.get();
+            pin_wrappers_.emplace_back(std::move(pw));
+            BitsetView chunk_bitset = bitset;
+            if (has_offset_mapping) {
+                chunk_bitset = AttachOffsetMappingIds(
+                    bitset,
+                    offset_mapping.GetPhysicalToLogicalIds(physical_begin,
+                                                           chunk_size));
+            }
+            return ChunkSearchData{
+                {physical_begin, query_ds.dim, chunk_size, chunk_data},
+                chunk_bitset};
+        });
+}
+
+void
+CachedSearchIterator::NextBatch(const SearchInfo& search_info,
+                                SearchResult& search_result) {
+    if (iterators_.empty()) {
+        return;
+    }
+
+    if (iterators_.size() != nq_ * num_chunks_) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Iterator size mismatch, expect %d, but got %d",
+                  nq_ * num_chunks_,
+                  iterators_.size());
+    }
+
+    ValidateSearchInfo(search_info);
+
+    search_result.total_nq_ = nq_;
+    search_result.unity_topK_ = batch_size_;
+    search_result.seg_offsets_.resize(nq_ * batch_size_);
+    search_result.distances_.resize(nq_ * batch_size_);
+
+    for (size_t query_idx = 0; query_idx < nq_; ++query_idx) {
+        auto rst = GetBatchedNextResults(query_idx, search_info);
+        WriteSingleQuerySearchResult(
+            search_result, query_idx, rst, search_info.round_decimal_);
+    }
+}
+
+void
+CachedSearchIterator::ValidateSearchInfo(const SearchInfo& search_info) {
+    if (!search_info.iterator_v2_info_.has_value()) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Iterator v2 SearchInfo is not set");
+    }
+
+    const auto& iterator_v2_info = search_info.iterator_v2_info_.value();
+    if (iterator_v2_info.batch_size != batch_size_) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Batch size mismatch, expect %d, but got %d",
+                  batch_size_,
+                  iterator_v2_info.batch_size);
+    }
+}
+
+std::optional<CachedSearchIterator::DisIdPair>
+CachedSearchIterator::GetNextValidResult(
+    const size_t iterator_idx,
+    const std::optional<float>& last_bound,
+    const std::optional<float>& radius,
+    const std::optional<float>& range_filter) {
+    auto& iterator = iterators_[iterator_idx];
+    while (true) {
+        auto has_next = iterator->HasNext();
+        AssertInfo(has_next.has_value(),
+                   "knowhere iterator HasNext failed: {}",
+                   has_next.what());
+        if (!has_next.value()) {
+            break;
+        }
+        auto next = iterator->Next();
+        AssertInfo(
+            next.has_value(), "knowhere iterator Next failed: {}", next.what());
+        auto result = ConvertIteratorResult(next.value());
+        if (IsValid(result, last_bound, radius, range_filter)) {
+            return result;
+        }
+    }
+    return std::nullopt;
+}
+
+// TODO: Optimize this method
+void
+CachedSearchIterator::MergeChunksResults(
+    size_t query_idx,
+    const std::optional<float>& last_bound,
+    const std::optional<float>& radius,
+    const std::optional<float>& range_filter,
+    std::vector<DisIdPair>& rst) {
+    auto& heap = chunked_heaps_[query_idx];
+
+    if (heap.empty()) {
+        for (size_t chunk_id = 0; chunk_id < num_chunks_; ++chunk_id) {
+            const size_t iterator_idx = query_idx + chunk_id * nq_;
+            if (auto next_result = GetNextValidResult(
+                    iterator_idx, last_bound, radius, range_filter);
+                next_result.has_value()) {
+                heap.emplace(iterator_idx, next_result.value());
+            }
+        }
+    }
+
+    while (!heap.empty() && rst.size() < batch_size_) {
+        const auto [iterator_idx, cur_rst] = heap.top();
+        heap.pop();
+
+        // last_bound may change between NextBatch calls, discard any invalid results
+        if (!IsValid(cur_rst, last_bound, radius, range_filter)) {
+            continue;
+        }
+        rst.emplace_back(cur_rst);
+
+        if (auto next_result = GetNextValidResult(
+                iterator_idx, last_bound, radius, range_filter);
+            next_result.has_value()) {
+            heap.emplace(iterator_idx, next_result.value());
+        }
+    }
+}
+
+std::vector<CachedSearchIterator::DisIdPair>
+CachedSearchIterator::GetBatchedNextResults(size_t query_idx,
+                                            const SearchInfo& search_info) {
+    auto last_bound = ConvertIncomingDistance(
+        search_info.iterator_v2_info_.value().last_bound);
+    auto radius = ConvertIncomingDistance(
+        index::GetValueFromConfig<float>(search_info.search_params_, RADIUS));
+    auto range_filter =
+        ConvertIncomingDistance(index::GetValueFromConfig<float>(
+            search_info.search_params_, RANGE_FILTER));
+
+    std::vector<DisIdPair> rst;
+    rst.reserve(batch_size_);
+
+    if (num_chunks_ == 1) {
+        auto& iterator = iterators_[query_idx];
+        while (rst.size() < batch_size_) {
+            auto has_next = iterator->HasNext();
+            AssertInfo(has_next.has_value(),
+                       "knowhere iterator HasNext failed: {}",
+                       has_next.what());
+            if (!has_next.value()) {
+                break;
+            }
+            auto next = iterator->Next();
+            AssertInfo(next.has_value(),
+                       "knowhere iterator Next failed: {}",
+                       next.what());
+            auto result = ConvertIteratorResult(next.value());
+            if (IsValid(result, last_bound, radius, range_filter)) {
+                rst.emplace_back(result);
+            }
+        }
+    } else {
+        MergeChunksResults(query_idx, last_bound, radius, range_filter, rst);
+    }
+    std::sort(rst.begin(), rst.end());
+    if (sign_ == -1) {
+        std::for_each(rst.begin(), rst.end(), [this](DisIdPair& x) {
+            x.first = x.first * sign_;
+        });
+    }
+    while (rst.size() < batch_size_) {
+        rst.emplace_back(1.0f / 0.0f, -1);
+    }
+    return rst;
+}
+
+void
+CachedSearchIterator::WriteSingleQuerySearchResult(
+    SearchResult& search_result,
+    const size_t idx,
+    std::vector<DisIdPair>& rst,
+    const int64_t round_decimal) {
+    const float multiplier = pow(10.0, round_decimal);
+
+    std::transform(rst.begin(),
+                   rst.end(),
+                   search_result.distances_.begin() + idx * batch_size_,
+                   [multiplier, round_decimal](DisIdPair& x) {
+                       if (round_decimal != -1) {
+                           x.first =
+                               std::round(x.first * multiplier) / multiplier;
+                       }
+                       return x.first;
+                   });
+
+    std::transform(rst.begin(),
+                   rst.end(),
+                   search_result.seg_offsets_.begin() + idx * batch_size_,
+                   [](const DisIdPair& x) { return x.second; });
+}
+
+void
+CachedSearchIterator::Init(const SearchInfo& search_info) {
+    if (!search_info.iterator_v2_info_.has_value()) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Iterator v2 info is not set, cannot initialize iterator");
+    }
+
+    const auto& iterator_v2_info = search_info.iterator_v2_info_.value();
+    if (iterator_v2_info.batch_size == 0) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Batch size is 0, cannot initialize iterator");
+    }
+    batch_size_ = iterator_v2_info.batch_size;
+
+    if (search_info.metric_type_.empty()) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Metric type is empty, cannot initialize iterator");
+    }
+    if (PositivelyRelated(search_info.metric_type_)) {
+        sign_ = -1;
+    } else {
+        sign_ = 1;
+    }
+
+    if (nq_ == 0) {
+        ThrowInfo(ErrorCode::UnexpectedError,
+                  "Number of queries is 0, cannot initialize iterator");
+    }
+
+    // disable multi-query for now
+    if (nq_ > 1) {
+        ThrowInfo(
+            ErrorCode::UnexpectedError,
+            "Number of queries is greater than 1, cannot initialize iterator");
+    }
+}
+
+}  // namespace milvus::query

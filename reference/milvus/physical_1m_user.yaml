@@ -1,0 +1,20 @@
+# Overlay for the patched Milvus server; create a complete config with the helper.
+streaming:
+  flush:
+    l1:
+      maxRowNum: 1000000
+dataCoord:
+  enableCompaction: false
+  compaction:
+    enableAutoCompaction: false
+  segment:
+    sealProportion: 1.0
+    sealProportionJitter: 0.0
+# Memory-pressure safeguards retain their upstream values. An early seal makes
+# the physical-layout gate fail; it must never be reported as a full 1M segment.
+
+# Allow the tiny Git fixture's final sealed segment to build the actual LSH index.
+# This does not change the 1M retained-row partition capacity or LSH parameters.
+indexCoord:
+  segment:
+    minSegmentNumRowsToEnableIndex: 1

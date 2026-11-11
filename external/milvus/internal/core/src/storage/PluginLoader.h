@@ -1,0 +1,192 @@
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#pragma once
+
+#include <dlfcn.h>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+
+#include "common/type_c.h"
+#include "log/Log.h"
+#include "storage/plugin/PluginInterface.h"
+#include "common/EasyAssert.h"
+#include "common/Exception.h"
+
+namespace milvus::storage {
+
+class PluginLoader {
+ public:
+    // Delete copy constructor and assignment operator to enforce singleton behavior
+    PluginLoader(const PluginLoader&) = delete;
+    PluginLoader&
+    operator=(const PluginLoader&) = delete;
+
+    static PluginLoader&
+    GetInstance() {
+        static PluginLoader instance;
+        return instance;
+    }
+
+    ~PluginLoader() {
+        unloadAll();
+    }
+
+    void
+    load(const std::string& path) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        void* handle = dlopen(path.c_str(), RTLD_LAZY);
+        // void *handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_DEEPBIND);
+        if (!handle) {
+            // ThrowInfo prints before throwing. Both the configured path and
+            // dlerror can contain protected configuration, so name only the
+            // failed stage, including at these pre-CStatus output boundaries.
+            ThrowInfo(UnexpectedError, "Failed to open plugin library");
+        }
+
+        // Rest error flags
+        dlerror();
+
+        using IPluginPtr = milvus::storage::plugin::IPlugin* (*)();
+        auto createPluginFunc =
+            reinterpret_cast<IPluginPtr>(dlsym(handle, "CreatePlugin"));
+
+        const char* error = dlerror();
+        if (error) {
+            dlclose(handle);
+            ThrowInfo(UnexpectedError, "Failed to find plugin factory");
+        }
+
+        auto pluginPtr = createPluginFunc();
+        if (!pluginPtr) {
+            dlclose(handle);
+            ThrowInfo(UnexpectedError, "Plugin factory returned no instance");
+        }
+
+        std::string pluginName = pluginPtr->getPluginName();
+        if (plugins_.find(pluginName) != plugins_.end()) {
+            LOG_DEBUG("Plugin is already loaded.");
+            dlclose(handle);
+            return;
+        }
+
+        // Store the plugin and its handle
+        plugins_[pluginName] =
+            std::shared_ptr<milvus::storage::plugin::IPlugin>(pluginPtr);
+        handles_[pluginName] = handle;
+        LOG_INFO("Loaded plugin");
+    }
+
+    // Visible for testing: install a plugin instance directly, bypassing
+    // dlopen, so unit tests can exercise code paths that resolve the cipher
+    // plugin through this singleton.
+    void
+    registerPluginForTest(
+        std::shared_ptr<milvus::storage::plugin::IPlugin> plugin) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        plugins_[plugin->getPluginName()] = std::move(plugin);
+    }
+
+    void
+    unregisterPluginForTest(const std::string& plugin_name) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        plugins_.erase(plugin_name);
+    }
+
+    void
+    unloadAll() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        plugins_.clear();
+        for (auto& handle : handles_) {
+            dlclose(handle.second);
+        }
+        handles_.clear();
+    }
+
+    std::shared_ptr<milvus::storage::plugin::ICipherPlugin>
+    getCipherPlugin() {
+        auto p = getPlugin("CipherPlugin");
+        if (!p) {
+            return nullptr;
+        }
+        return std::dynamic_pointer_cast<
+            milvus::storage::plugin::ICipherPlugin>(p);
+    }
+
+    std::shared_ptr<CPluginContext>
+    registerCipherPluginContext(int64_t ez_id,
+                                int64_t collection_id,
+                                const std::string& key) {
+        return registerCipherPluginContext(
+            ez_id, collection_id, key, getCipherPlugin());
+    }
+
+    std::shared_ptr<CPluginContext>
+    registerCipherPluginContext(
+        int64_t ez_id,
+        int64_t collection_id,
+        const std::string& key,
+        const std::shared_ptr<plugin::ICipherPlugin>& cipher_plugin) {
+        AssertInfo(cipher_plugin != nullptr, "failed to get cipher plugin");
+        cipher_plugin->Update(ez_id, collection_id, key);
+
+        // The plugin owns the key copy. Storage operations retain only the IDs
+        // needed for later encryptor/decryptor lookups.
+        auto context = std::make_shared<CPluginContext>();
+        context->ez_id = ez_id;
+        context->collection_id = collection_id;
+        context->key = nullptr;
+        return context;
+    }
+
+    std::shared_ptr<milvus::storage::plugin::IPlugin>
+    getPlugin(const std::string& name) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = plugins_.find(name);
+        return it != plugins_.end() ? it->second : nullptr;
+    }
+
+#ifdef MILVUS_UNIT_TEST
+    void
+    addPluginForTest(std::shared_ptr<milvus::storage::plugin::IPlugin> plugin) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        plugins_[plugin->getPluginName()] = std::move(plugin);
+    }
+#endif
+
+    void
+    unload(const std::string& name) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = plugins_.find(name);
+        if (it != plugins_.end()) {
+            plugins_.erase(it);
+        }
+
+        auto handleIt = handles_.find(name);
+        if (handleIt != handles_.end()) {
+            dlclose(handleIt->second);
+            handles_.erase(handleIt);
+        }
+    }
+
+ private:
+    PluginLoader() {
+    }
+
+    mutable std::mutex mutex_;
+    std::map<std::string, void*> handles_;
+    std::map<std::string, std::shared_ptr<milvus::storage::plugin::IPlugin>>
+        plugins_;
+};
+
+}  // namespace milvus::storage

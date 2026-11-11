@@ -1,0 +1,38 @@
+# Transaction Messages
+
+Messages managing transactions on a single VChannel.
+
+| Message | Dispatch | ExclusiveRequired | ResourceKey |
+|---------|----------|-------------------|-------------|
+| BeginTxn | Single VChannel (no Broadcast) | No | — |
+| CommitTxn | Single VChannel (no Broadcast) | No | — |
+| RollbackTxn | Single VChannel (no Broadcast) | No | — |
+| Txn *(synthetic)* | Single VChannel (no Broadcast) | — | — |
+
+- **BeginTxn**: Opens a new transaction session, allocating a TxnID and establishing a keepalive window.
+- **CommitTxn**: Commits an open transaction, finalizing all body messages.
+- **RollbackTxn**: Aborts an open transaction, discarding all body messages.
+- **Txn**: Synthetic message — complete committed transaction assembled on consumer side, never directly appended.
+
+## Key Invariants
+
+- BeginTxn must precede all body messages and CommitTxn/RollbackTxn for the same transaction.
+- Body messages must arrive within the keepalive window, otherwise the transaction expires. After expiration, no messages for that transaction will appear in the WAL.
+- CommitTxn/RollbackTxn must come after all body messages have completed (inFlightCount == 0).
+- With partial-update CAS enabled, the lock interceptor enforces the body-before-commit order for local transactions before TimeTick: a CommitTxn freezes its transaction on arrival, later bodies are rejected with `TRANSACTION_EXPIRED`, and a commit that arrives while a body is still in flight is rejected with `TRANSACTION_EXPIRED` before TimeTick, so the row locks of an admitted commit cover the complete write set. See the [partial-update design](../../../design-docs/design_docs/20260601-partial-update-optimistic-lock-design.md).
+- The consumer assembles Begin + body messages into a single ImmutableTxnMessage using **CommitTxn's TimeTick and LastConfirmedMessageID** as the transaction's overall TimeTick and LastConfirmedMessageID.
+- On RollbackTxn, the consumer discards the corresponding Begin + body messages.
+
+```
+BeginTxn@tt=10 → Insert@tt=11 → Insert@tt=12 → CommitTxn@tt=15
+Consumer sees: ImmutableTxnMessage@tt=15 (contains all body messages)
+
+BeginTxn@tt=10 → Insert@tt=11 → RollbackTxn@tt=15
+Consumer sees: (nothing — body messages discarded)
+```
+
+Commit carries `body_cnt`, the expected logical body count excluding Begin/Commit
+and backend retries. Primary and secondary validate nonzero counts before Commit
+append; zero skips validation for legacy WAL. CDC forwards the original count,
+and consumption/recovery do not revalidate durable commits. Successful exclusive
+WAL appends abort scoped unfinished transactions. See [Local Flush](../wal/local-flush.md).

@@ -1,0 +1,214 @@
+name: Update PyMilvus in Milvus
+
+on:
+  schedule:
+    - cron: "5 2 * * *"  # daily at 02:05 UTC
+  workflow_dispatch:
+    inputs:
+      pymilvus_branch:
+        description: "PyMilvus branch to read the dev version from"
+        required: true
+        default: "master"
+        type: string
+      milvus_branch:
+        description: "Milvus branch to update"
+        required: true
+        default: "master"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+    - name: Resolve branch pairs
+      id: matrix
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        PYMILVUS_BRANCH: ${{ inputs.pymilvus_branch }}
+        MILVUS_BRANCH: ${{ inputs.milvus_branch }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT_NAME" = "schedule" ]; then
+          matrix='{"include":[{"pymilvus_branch":"master","milvus_branch":"master"},{"pymilvus_branch":"3.0","milvus_branch":"3.0"},{"pymilvus_branch":"2.6","milvus_branch":"2.6"}]}'
+        else
+          matrix="$(jq -cn --arg pymilvus_branch "$PYMILVUS_BRANCH" --arg milvus_branch "$MILVUS_BRANCH" '{include:[{pymilvus_branch:$pymilvus_branch,milvus_branch:$milvus_branch}]}')"
+        fi
+        echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  bump:
+    needs: resolve-matrix
+    runs-on: ubuntu-latest
+    name: Sync PyMilvus ${{ matrix.pymilvus_branch }} to Milvus ${{ matrix.milvus_branch }}
+    strategy:
+      fail-fast: false  # Continue with other branches even if one fails
+      matrix: ${{ fromJSON(needs.resolve-matrix.outputs.matrix) }}
+    steps:
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+
+    - name: Checkout pymilvus (repo root for workflow)
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ matrix.pymilvus_branch }}
+        persist-credentials: false
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.9.21"
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+
+    - name: Configure Git Identity
+      run: |
+        echo "Configuring git identity"
+        echo "Author name: ${{ secrets.GIT_AUTHOR_NAME }}"
+        echo "Author email: ${{ secrets.GIT_AUTHOR_EMAIL }}"
+        git config --global user.name "${{ secrets.GIT_AUTHOR_NAME }}"
+        git config --global user.email "${{ secrets.GIT_AUTHOR_EMAIL }}"
+
+    - name: Get history and tags for SCM versioning
+      run: |
+        git fetch --prune --unshallow
+        git fetch --depth=1 origin +refs/tags/*:refs/tags/*
+
+    - name: Checkout Milvus (upstream)
+      uses: actions/checkout@v6
+      with:
+        repository: milvus-io/milvus
+        ref: ${{ matrix.milvus_branch }}
+        path: milvus-upstream
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Determine latest dev version
+      id: version
+      run: |
+        VERSION=$(make -s version)
+        echo "latest=$VERSION" >> $GITHUB_OUTPUT
+        echo "Detected version: $VERSION"
+
+    - name: Read current pinned version in Milvus
+      id: current
+      run: |
+        set -euo pipefail
+        file="milvus-upstream/tests/python_client/requirements.txt"
+        if [ ! -f "$file" ]; then
+          echo "Requirements file not found: $file"
+          echo "current=not-found" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        curr="$(grep -E '^pymilvus(\[bulk_writer\])?==' "$file" | head -n1 | awk -F'==' '{print $2}')" || curr="not-found"
+        echo "found=$curr"
+        echo "current=$curr" >> $GITHUB_OUTPUT
+
+    - name: Skip if up-to-date
+      if: steps.current.outputs.current == steps.version.outputs.latest
+      run: echo "Already up-to-date. Skipping."
+
+    - name: Check for existing PR
+      if: steps.current.outputs.current != steps.version.outputs.latest
+      id: check_pr
+      env:
+        GH_TOKEN: ${{ secrets.MILVUS_UPDATE_TOKEN }}
+      run: |
+        set -euo pipefail
+        TARGET_VERSION="${{ steps.version.outputs.latest }}"
+        PYMILVUS_BRANCH="${{ matrix.pymilvus_branch }}"
+        TARGET_BRANCH="${{ matrix.milvus_branch }}"
+
+        # Search for open PRs with matching title pattern
+        PR_TITLE_PATTERN="test: Increase PyMilvus version to ${TARGET_VERSION} from ${PYMILVUS_BRANCH} for ${TARGET_BRANCH} branch"
+        LEGACY_PR_TITLE_PATTERN="test: Increase PyMilvus version to ${TARGET_VERSION} for ${TARGET_BRANCH} branch"
+        echo "Checking for existing PRs with title pattern: $PR_TITLE_PATTERN"
+
+        # List open PRs and check if any match our criteria
+        EXISTING_PR=$(
+          gh pr list --repo milvus-io/milvus --base "${TARGET_BRANCH}" --state open --json number,title,author |
+            jq -r --arg title "$PR_TITLE_PATTERN" --arg legacy_title "$LEGACY_PR_TITLE_PATTERN" '.[] | select(.title == $title or .title == $legacy_title) | .number' || echo ""
+        )
+
+        if [ -n "$EXISTING_PR" ]; then
+          echo "Found existing PR #$EXISTING_PR with same version update"
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
+        else
+          echo "No existing PR found for this version update"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Skip if PR already exists
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists == 'true'
+      run: |
+        echo "PR #${{ steps.check_pr.outputs.pr_number }} already exists for updating to version ${{ steps.version.outputs.latest }}"
+        echo "Skipping PR creation to avoid duplicate."
+
+    - name: Prepare branch
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists != 'true'
+      run: |
+        set -euo pipefail
+        cd milvus-upstream
+        # Create unique branch name with target branch reference
+        PYMILVUS_BRANCH="$(echo '${{ matrix.pymilvus_branch }}' | sed 's#[./]#-#g')"
+        TARGET_BRANCH="$(echo '${{ matrix.milvus_branch }}' | sed 's#[./]#-#g')"
+        BR="bot/pymilvus-update-${PYMILVUS_BRANCH}-to-${TARGET_BRANCH}-${{ steps.version.outputs.latest }}-$(date -u +%Y%m%d%H%M%S)"
+        echo "BRANCH=$BR" >> $GITHUB_ENV
+        git switch -c "$BR"
+
+    - name: Update requirements.txt
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists != 'true'
+      run: |
+        set -euo pipefail
+        file="milvus-upstream/tests/python_client/requirements.txt"
+        ver="${{ steps.version.outputs.latest }}"
+        # Replace exact pins for both lines
+        sed -i -E "s/^pymilvus==[0-9A-Za-z\.\-]+/pymilvus==${ver}/" "$file"
+        sed -i -E "s/^pymilvus\[bulk_writer\]==[0-9A-Za-z\.\-]+/pymilvus[bulk_writer]==${ver}/" "$file"
+        echo "Updated to $ver"
+        grep -nE '^pymilvus(\[bulk_writer\])?==' "$file" || true
+
+    - name: Commit
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists != 'true'
+      run: |
+        set -euo pipefail
+        cd milvus-upstream
+        git add tests/python_client/requirements.txt
+        git commit -sm "test: Increase PyMilvus version to ${{ steps.version.outputs.latest }}"
+
+
+    - name: Push to fork
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists != 'true'
+      run: |
+        set -euo pipefail
+        cd milvus-upstream
+        cat ~/.git-credentials || echo "no cached creds"
+        git remote -v
+        echo "BRANCH=${{ env.BRANCH }}"
+        echo "REPO_FORK=${{ vars.REPO_FORK }}"
+        remote="https://x-access-token:${{ secrets.MILVUS_UPDATE_TOKEN }}@github.com/${{ vars.REPO_FORK }}.git"
+        git remote add fork "$remote" || git remote set-url fork "$remote"
+        GIT_CURL_VERBOSE=1 GIT_TRACE=1 git push -u fork "$BRANCH"
+
+    - name: Open PR to milvus-io/milvus
+      if: steps.current.outputs.current != steps.version.outputs.latest && steps.check_pr.outputs.exists != 'true'
+      env:
+        GH_TOKEN: ${{ secrets.MILVUS_UPDATE_TOKEN }}
+      run: |
+        set -euo pipefail
+        title="test: Increase PyMilvus version to ${{ steps.version.outputs.latest }} from ${{ matrix.pymilvus_branch }} for ${{ matrix.milvus_branch }} branch"
+        body="Automated bump from pymilvus ${{ matrix.pymilvus_branch }} branch to milvus ${{ matrix.milvus_branch }} branch. Updates tests/python_client/requirements.txt."
+        head="$(echo ${{ vars.REPO_FORK }} | cut -d'/' -f1):${BRANCH}"
+        base="${{ matrix.milvus_branch }}"
+        echo "title=$title"
+        echo "body=$body"
+        echo "head=$head"
+        echo "base=$base"
+        gh pr create --repo milvus-io/milvus --title "$title" --body "$body" --head "$head" --base "$base"

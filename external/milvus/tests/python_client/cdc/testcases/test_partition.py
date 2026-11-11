@@ -1,0 +1,511 @@
+"""
+CDC sync tests for partition operations.
+"""
+
+import time
+
+import pytest
+from common.common_type import CaseLabel
+from pymilvus import DataType
+from pymilvus.client.types import LoadState
+
+from .base import TestCDCSyncBase
+
+
+@pytest.mark.tags(CaseLabel.CDC, CaseLabel.L3)
+class TestCDCSyncPartition(TestCDCSyncBase):
+    """Test CDC sync for partition operations."""
+
+    def setup_method(self):
+        """Setup for each test method."""
+        self.resources_to_cleanup = []
+
+    def teardown_method(self):
+        """Cleanup after each test method - only cleanup upstream, downstream will sync."""
+        upstream_client = getattr(self, "_upstream_client", None)
+
+        if upstream_client:
+            for resource_type, resource_name in self.resources_to_cleanup:
+                if resource_type == "collection":
+                    self.cleanup_collection(upstream_client, resource_name)
+
+            time.sleep(1)  # Allow cleanup to sync to downstream
+
+    def test_create_partition(self, upstream_client, downstream_client, sync_timeout):
+        """Test CREATE_PARTITION operation sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_create")
+        partition_name = self.gen_unique_name("test_part_create")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+        )
+
+        # Wait for creation to sync
+        def check_create():
+            return downstream_client.has_collection(collection_name)
+
+        assert self.wait_for_sync(check_create, sync_timeout, f"create collection {collection_name}")
+
+        # Create partition
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Verify partition exists in upstream
+        upstream_partitions = upstream_client.list_partitions(collection_name)
+        assert partition_name in upstream_partitions
+
+        # Wait for partition sync to downstream
+        def check_partition():
+            try:
+                downstream_partitions = downstream_client.list_partitions(collection_name)
+                return partition_name in downstream_partitions
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(check_partition, sync_timeout, f"create partition {partition_name}")
+
+    def test_drop_partition(self, upstream_client, downstream_client, sync_timeout):
+        """Test DROP_PARTITION operation sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_drop")
+        partition_name = self.gen_unique_name("test_part_drop")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection and partition
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+        )
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Wait for setup to sync
+        def check_setup():
+            try:
+                return downstream_client.has_collection(
+                    collection_name
+                ) and partition_name in downstream_client.list_partitions(collection_name)
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(
+            check_setup,
+            sync_timeout,
+            f"setup collection and partition {collection_name}",
+        )
+
+        # Drop partition
+        upstream_client.drop_partition(collection_name, partition_name)
+
+        # Verify partition is dropped in upstream
+        upstream_partitions = upstream_client.list_partitions(collection_name)
+        assert partition_name not in upstream_partitions
+
+        # Wait for drop to sync to downstream
+        def check_drop():
+            try:
+                downstream_partitions = downstream_client.list_partitions(collection_name)
+                return partition_name not in downstream_partitions
+            except Exception:
+                return False  # A failed read does not prove deletion.
+
+        assert self.wait_for_sync(check_drop, sync_timeout, f"drop partition {partition_name}")
+
+    def test_load_partition(self, upstream_client, downstream_client, sync_timeout):
+        """Test LOAD_PARTITION operation sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_load")
+        partition_name = self.gen_unique_name("test_part_load")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection, partition, and index
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+        )
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Create index and load collection (required for querying/searching)
+        index_params = upstream_client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="L2")
+        upstream_client.create_index(collection_name, index_params)
+
+        # Wait for setup to sync
+        def check_setup():
+            try:
+                return downstream_client.has_collection(
+                    collection_name
+                ) and partition_name in downstream_client.list_partitions(collection_name)
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(
+            check_setup,
+            sync_timeout,
+            f"setup collection and partition {collection_name}",
+        )
+
+        # Load partition
+        upstream_client.load_partitions(collection_name, [partition_name])
+        # check partition load state in upstream
+        upstream_load_state = upstream_client.get_load_state(collection_name, partition_name)
+        load_state = str(upstream_load_state["state"])
+        print(f"DEBUG: partition load state in upstream: {load_state}")
+
+        # Wait for load to sync
+        def check_load():
+            try:
+                # Check partition load state
+                load_state = downstream_client.get_load_state(
+                    collection_name=collection_name, partition_name=partition_name
+                )
+                print(f"DEBUG: partition load state in check_load: {load_state['state']}")
+                return "Loaded" == str(load_state["state"])
+            except Exception as e:
+                print(f"DEBUG: get_load_state exception in check_load: {e}")
+                return False
+
+        assert self.wait_for_sync(check_load, sync_timeout, f"load partition {partition_name}")
+
+    def test_release_partition(self, upstream_client, downstream_client, sync_timeout):
+        """Test RELEASE_PARTITION operation sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_release")
+        partition_name = self.gen_unique_name("test_part_release")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection, partition, index, and load
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+        )
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Create index and load collection (required for querying/searching)
+        index_params = upstream_client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="L2")
+        upstream_client.create_index(collection_name, index_params)
+        upstream_client.load_collection(collection_name)
+        upstream_client.load_partitions(collection_name, [partition_name])
+        for p_name in [partition_name, None]:
+            data = [{"vector": [0.1] * 128, "id": i} for i in range(100)]
+            upstream_client.insert(collection_name, data, partition_name=p_name)
+
+        # Wait for setup to sync
+        def check_setup():
+            try:
+                query_vector = [[0.1] * 128]
+                downstream_client.search(
+                    collection_name=collection_name,
+                    data=query_vector,
+                    limit=1,
+                    partition_names=[partition_name],
+                    output_fields=[],
+                )
+                return True
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(check_setup, sync_timeout, f"setup and load partition {partition_name}")
+
+        # Release partition
+        upstream_client.release_partitions(collection_name, [partition_name])
+
+        def check_release():
+            for client in (upstream_client, downstream_client):
+                state = client.get_load_state(collection_name, partition_name=partition_name)["state"]
+                if state != LoadState.NotLoad:
+                    return False
+                # Releasing one partition must not unload the default partition.
+                rows = client.query(
+                    collection_name, filter="", output_fields=["count(*)"], partition_names=["_default"]
+                )
+                if rows[0]["count(*)"] != 100:
+                    return False
+            return True
+
+        assert self.wait_for_sync(check_release, sync_timeout, f"release partition {partition_name}")
+
+    def test_partition_insert(self, upstream_client, downstream_client, sync_timeout):
+        """Test INSERT operation to partition sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_insert")
+        partition_name = self.gen_unique_name("test_part_insert")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection and partition
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+        )
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Create index and load collection (required for querying/searching)
+        index_params = upstream_client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="L2")
+        upstream_client.create_index(collection_name, index_params)
+        upstream_client.load_collection(collection_name)
+
+        # Wait for setup to sync
+        def check_setup():
+            try:
+                return downstream_client.has_collection(
+                    collection_name
+                ) and partition_name in downstream_client.list_partitions(collection_name)
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(
+            check_setup,
+            sync_timeout,
+            f"setup collection and partition {collection_name}",
+        )
+
+        # Insert data to specific partition
+        test_data = self.generate_test_data(100)
+        result = upstream_client.insert(collection_name, test_data, partition_name=partition_name)
+        inserted_count = result.get("insert_count", len(test_data))
+
+        # Flush to ensure data is persisted
+        upstream_client.flush(collection_name)
+
+        # Wait for data sync to downstream partition by querying
+        def check_data():
+            try:
+                # Query data in specific partition
+                result = downstream_client.query(
+                    collection_name=collection_name,
+                    filter="",
+                    output_fields=["count(*)"],
+                    partition_names=[partition_name],
+                )
+                count = result[0]["count(*)"] if result else 0
+                return count >= inserted_count
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(check_data, sync_timeout, f"insert data to partition {partition_name}")
+
+    @pytest.mark.parametrize("flush_after_insert", [False, True], ids=["without_flush", "with_flush"])
+    def test_create_partition_after_collection_load(
+        self, upstream_client, downstream_client, sync_timeout, flush_after_insert
+    ):
+        """Verify partitions created after collection load become queryable through CDC (#54467)."""
+        self._upstream_client = upstream_client
+        collection_name = self.gen_unique_name("test_col_part_after_load")
+        self.resources_to_cleanup.append(("collection", collection_name))
+        self.cleanup_collection(upstream_client, collection_name)
+
+        schema = self.create_default_schema(upstream_client)
+        schema.add_field("value", DataType.INT64)
+        upstream_client.create_collection(collection_name=collection_name, schema=schema, consistency_level="Strong")
+        control_partition = self.gen_unique_name("part_before_load")
+        upstream_client.create_partition(collection_name, control_partition)
+        index_params = upstream_client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="FLAT", metric_type="L2")
+        upstream_client.create_index(collection_name, index_params)
+
+        def query_rows(client, partition_name=None):
+            rows = client.query(
+                collection_name=collection_name,
+                filter="id >= 0",
+                output_fields=["id", "value", "vector"],
+                partition_names=[partition_name] if partition_name else None,
+                consistency_level="Strong",
+                limit=100,
+                timeout=10,
+            )
+            return sorted(rows, key=lambda row: row["id"])
+
+        def check_partition(partition_name, expected_rows):
+            assert partition_name in downstream_client.list_partitions(collection_name)
+            state = downstream_client.get_load_state(collection_name, partition_name=partition_name)
+            assert str(state["state"]) == "Loaded", f"Partition {partition_name}: {state}"
+            actual_rows = query_rows(downstream_client, partition_name)
+            assert actual_rows == expected_rows, f"Partition {partition_name}: {actual_rows} != {expected_rows}"
+            return True
+
+        # Establish a working pre-load control before creating any post-load partitions.
+        control_data = [{"id": 0, "value": 0, "vector": [0.125] * 128}]
+        upstream_client.insert(collection_name, control_data, partition_name=control_partition)
+        upstream_client.load_collection(collection_name)
+        assert str(upstream_client.get_load_state(collection_name)["state"]) == "Loaded"
+        assert query_rows(upstream_client, control_partition) == control_data
+
+        def check_initial_load():
+            assert str(downstream_client.get_load_state(collection_name)["state"]) == "Loaded"
+            return check_partition(control_partition, control_data)
+
+        assert self.wait_for_sync(check_initial_load, sync_timeout, f"initial collection load {collection_name}")
+
+        expected_collection_rows = list(control_data)
+        for i in range(1, 4):
+            partition_name = self.gen_unique_name(f"part_after_load_{i}")
+            upstream_client.create_partition(collection_name, partition_name)
+            data = [{"id": i, "value": i * 10, "vector": [i / 8.0] * 128}]
+            upstream_client.insert(collection_name, data, partition_name=partition_name)
+            if flush_after_insert:
+                upstream_client.flush(collection_name)
+
+            # No additional load/release calls: the new partition must load automatically.
+            state = upstream_client.get_load_state(collection_name, partition_name=partition_name)
+            assert str(state["state"]) == "Loaded", f"Upstream partition {partition_name}: {state}"
+            assert query_rows(upstream_client, partition_name) == data
+            assert self.wait_for_sync(
+                lambda: check_partition(partition_name, data),
+                sync_timeout,
+                f"automatically load and replicate partition {partition_name}",
+            )
+
+            expected_collection_rows.extend(data)
+            assert query_rows(upstream_client) == expected_collection_rows
+
+            def check_collection_data():
+                actual_rows = query_rows(downstream_client)
+                assert actual_rows == expected_collection_rows, f"Collection rows: {actual_rows}"
+                return True
+
+            assert self.wait_for_sync(
+                check_collection_data, sync_timeout, f"collection query includes partition {partition_name}"
+            )
+
+    def test_partition_delete(self, upstream_client, downstream_client, sync_timeout):
+        """Test DELETE operation from partition sync."""
+        # Store upstream client for teardown
+        self._upstream_client = upstream_client
+
+        collection_name = self.gen_unique_name("test_col_part_delete")
+        partition_name = self.gen_unique_name("test_part_delete")
+        self.resources_to_cleanup.append(("collection", collection_name))
+
+        # Initial cleanup
+        self.cleanup_collection(upstream_client, collection_name)
+
+        # Create collection and partition
+        upstream_client.create_collection(
+            collection_name=collection_name,
+            schema=self.create_default_schema(upstream_client),
+            consistency_level="Strong",
+        )
+        upstream_client.create_partition(collection_name, partition_name)
+
+        # Create index and load collection (required for querying/searching)
+        index_params = upstream_client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="L2")
+        upstream_client.create_index(collection_name, index_params)
+        upstream_client.load_collection(collection_name)
+
+        # Wait for setup to sync
+        def check_setup():
+            try:
+                return downstream_client.has_collection(
+                    collection_name
+                ) and partition_name in downstream_client.list_partitions(collection_name)
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(
+            check_setup,
+            sync_timeout,
+            f"setup collection and partition {collection_name}",
+        )
+
+        # Insert data to partition
+        test_data = self.generate_test_data(100)
+        upstream_client.insert(collection_name, test_data, partition_name=partition_name)
+        upstream_client.flush(collection_name)
+
+        # Wait for initial data sync by querying partition
+        def check_data():
+            try:
+                result = downstream_client.query(
+                    collection_name=collection_name,
+                    filter="",
+                    output_fields=["count(*)"],
+                    partition_names=[partition_name],
+                )
+                count = result[0]["count(*)"] if result else 0
+                return count >= 100
+            except Exception:
+                return False
+
+        assert self.wait_for_sync(check_data, sync_timeout, f"initial data sync to partition {partition_name}")
+
+        # Delete some data from partition
+        delete_ids = list(range(20))  # Delete first 20 records
+        upstream_client.delete(collection_name, filter=f"id in {delete_ids}", partition_name=partition_name)
+        upstream_client.flush(collection_name)
+        deleted_result = upstream_client.query(
+            collection_name=collection_name,
+            filter=f"id in {delete_ids}",
+            output_fields=["id"],
+            partition_names=[partition_name],
+        )
+        total_count = upstream_client.query(
+            collection_name=collection_name,
+            filter="",
+            output_fields=["count(*)"],
+            partition_names=[partition_name],
+        )
+        total_count = total_count[0]["count(*)"] if total_count else 0
+        print(f"DEBUG: deleted_result in upstream: {deleted_result}")
+        print(f"DEBUG: total_count in upstream: {total_count}")
+
+        # Wait for delete to sync by querying partition
+        def check_delete():
+            try:
+                # Query for the deleted records in partition - should return empty
+                deleted_result = downstream_client.query(
+                    collection_name=collection_name,
+                    filter=f"id in {delete_ids}",
+                    output_fields=["id"],
+                    partition_names=[partition_name],
+                )
+                # Query total count in partition
+                count_result = downstream_client.query(
+                    collection_name=collection_name,
+                    filter="",
+                    output_fields=["count(*)"],
+                    partition_names=[partition_name],
+                )
+                deleted_count = len(deleted_result) if deleted_result else 0
+                total_count = count_result[0]["count(*)"] if count_result else 0
+
+                print(f"DEBUG: deleted_result in check_delete: {deleted_result}")
+                print(f"DEBUG: count_result in check_delete: {count_result}")
+                print(f"DEBUG: deleted_count: {deleted_count}, total_count: {total_count}")
+
+                # Verify deleted records are gone and total count is correct in partition
+                return deleted_count == 0 and total_count == 80
+            except Exception as e:
+                print(f"DEBUG: query exception in check_delete: {e}")
+                return False
+
+        assert self.wait_for_sync(check_delete, sync_timeout, f"delete data from partition {partition_name}")

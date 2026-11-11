@@ -1,0 +1,837 @@
+package common
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+)
+
+func TestIsSystemField(t *testing.T) {
+	type args struct {
+		fieldID int64
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			args: args{fieldID: StartOfUserFieldID},
+			want: false,
+		},
+		{
+			args: args{fieldID: StartOfUserFieldID + 1},
+			want: false,
+		},
+		{
+			args: args{fieldID: TimeStampField},
+			want: true,
+		},
+		{
+			args: args{fieldID: RowIDField},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.want, IsSystemField(tt.args.fieldID), "IsSystemField(%v)", tt.args.fieldID)
+		})
+	}
+}
+
+func TestDatabaseProperties(t *testing.T) {
+	props := []*commonpb.KeyValuePair{
+		{
+			Key:   DatabaseReplicaNumber,
+			Value: "3",
+		},
+		{
+			Key:   DatabaseResourceGroups,
+			Value: strings.Join([]string{"rg1", "rg2"}, ","),
+		},
+	}
+
+	replicaNum, err := DatabaseLevelReplicaNumber(props)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), replicaNum)
+
+	rgs, err := DatabaseLevelResourceGroups(props)
+	assert.NoError(t, err)
+	assert.Contains(t, rgs, "rg1")
+	assert.Contains(t, rgs, "rg2")
+
+	// test prop not found
+	_, err = DatabaseLevelReplicaNumber(nil)
+	assert.Error(t, err)
+
+	_, err = DatabaseLevelResourceGroups(nil)
+	assert.Error(t, err)
+
+	// test invalid prop value
+
+	props = []*commonpb.KeyValuePair{
+		{
+			Key:   DatabaseReplicaNumber,
+			Value: "xxxx",
+		},
+		{
+			Key:   DatabaseResourceGroups,
+			Value: "",
+		},
+	}
+	_, err = DatabaseLevelReplicaNumber(props)
+	assert.Error(t, err)
+
+	_, err = DatabaseLevelResourceGroups(props)
+	assert.Error(t, err)
+}
+
+func TestCommonPartitionKeyIsolation(t *testing.T) {
+	getProto := func(val string) []*commonpb.KeyValuePair {
+		return []*commonpb.KeyValuePair{
+			{
+				Key:   PartitionKeyIsolationKey,
+				Value: val,
+			},
+		}
+	}
+
+	getMp := func(val string) map[string]string {
+		return map[string]string{
+			PartitionKeyIsolationKey: val,
+		}
+	}
+
+	t.Run("pb", func(t *testing.T) {
+		props := getProto("true")
+		res, err := IsPartitionKeyIsolationKvEnabled(props...)
+		assert.NoError(t, err)
+		assert.True(t, res)
+
+		props = getProto("false")
+		res, err = IsPartitionKeyIsolationKvEnabled(props...)
+		assert.NoError(t, err)
+		assert.False(t, res)
+
+		props = getProto("")
+		res, err = IsPartitionKeyIsolationKvEnabled(props...)
+		assert.ErrorContains(t, err, "failed to parse partition key isolation")
+		assert.False(t, res)
+
+		props = getProto("invalid")
+		res, err = IsPartitionKeyIsolationKvEnabled(props...)
+		assert.ErrorContains(t, err, "failed to parse partition key isolation")
+		assert.False(t, res)
+	})
+
+	t.Run("map", func(t *testing.T) {
+		props := getMp("true")
+		res, err := IsPartitionKeyIsolationPropEnabled(props)
+		assert.NoError(t, err)
+		assert.True(t, res)
+
+		props = getMp("false")
+		res, err = IsPartitionKeyIsolationPropEnabled(props)
+		assert.NoError(t, err)
+		assert.False(t, res)
+
+		props = getMp("")
+		res, err = IsPartitionKeyIsolationPropEnabled(props)
+		assert.ErrorContains(t, err, "failed to parse partition key isolation property")
+		assert.False(t, res)
+
+		props = getMp("invalid")
+		res, err = IsPartitionKeyIsolationPropEnabled(props)
+		assert.ErrorContains(t, err, "failed to parse partition key isolation property")
+		assert.False(t, res)
+	})
+}
+
+func TestNamespaceMode(t *testing.T) {
+	t.Run("default mode is partition key", func(t *testing.T) {
+		assert.Equal(t, NamespaceModePartitionKey, GetNamespaceMode())
+		assert.True(t, IsNamespaceModePartitionKey())
+		assert.False(t, IsNamespaceModePartition())
+		assert.NoError(t, ValidateNamespaceMode())
+	})
+
+	t.Run("accepts partition key mode", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: NamespaceModeKey, Value: NamespaceModePartitionKey},
+		}
+		assert.Equal(t, NamespaceModePartitionKey, GetNamespaceMode(kvs...))
+		assert.True(t, IsNamespaceModePartitionKey(kvs...))
+		assert.False(t, IsNamespaceModePartition(kvs...))
+		assert.NoError(t, ValidateNamespaceMode(kvs...))
+	})
+
+	t.Run("accepts partition mode", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: NamespaceModeKey, Value: NamespaceModePartition},
+		}
+		assert.Equal(t, NamespaceModePartition, GetNamespaceMode(kvs...))
+		assert.False(t, IsNamespaceModePartitionKey(kvs...))
+		assert.True(t, IsNamespaceModePartition(kvs...))
+		assert.NoError(t, ValidateNamespaceMode(kvs...))
+	})
+
+	t.Run("rejects invalid value", func(t *testing.T) {
+		for _, val := range []string{"invalid", "multitenant"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: NamespaceModeKey, Value: val},
+			}
+			err := ValidateNamespaceMode(kvs...)
+			assert.Error(t, err)
+			assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+			assert.Contains(t, err.Error(), "valid values")
+		}
+	})
+
+	t.Run("rejects wrong case value", func(t *testing.T) {
+		for _, val := range []string{"PARTITION_KEY", "Partition"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: NamespaceModeKey, Value: val},
+			}
+			err := ValidateNamespaceMode(kvs...)
+			assert.Error(t, err, "value %q should be rejected", val)
+			assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+			assert.Contains(t, err.Error(), "valid values")
+		}
+	})
+
+	t.Run("rejects wrong case key", func(t *testing.T) {
+		for _, key := range []string{"NAMESPACE.MODE", "Namespace.Mode", "namespace.Mode"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: key, Value: NamespaceModePartition},
+			}
+			err := ValidateNamespaceMode(kvs...)
+			assert.Error(t, err, "key %q should be rejected", key)
+			assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+			assert.Contains(t, err.Error(), "did you mean")
+		}
+	})
+}
+
+func TestShouldFieldBeLoaded(t *testing.T) {
+	type testCase struct {
+		tag          string
+		input        []*commonpb.KeyValuePair
+		expectOutput bool
+		expectError  bool
+	}
+
+	testcases := []testCase{
+		{tag: "no_params", expectOutput: true},
+		{tag: "skipload_true", input: []*commonpb.KeyValuePair{{Key: FieldSkipLoadKey, Value: "true"}}, expectOutput: false},
+		{tag: "skipload_false", input: []*commonpb.KeyValuePair{{Key: FieldSkipLoadKey, Value: "false"}}, expectOutput: true},
+		{tag: "bad_skip_load_value", input: []*commonpb.KeyValuePair{{Key: FieldSkipLoadKey, Value: "abc"}}, expectError: true},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.tag, func(t *testing.T) {
+			result, err := ShouldFieldBeLoaded(tc.input)
+			if tc.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expectOutput, result)
+			}
+		})
+	}
+}
+
+func TestIsEnableDynamicSchema(t *testing.T) {
+	type testCase struct {
+		tag         string
+		input       []*commonpb.KeyValuePair
+		expectFound bool
+		expectValue bool
+		expectError bool
+	}
+
+	cases := []testCase{
+		{tag: "no_params", expectFound: false},
+		{tag: "dynamicfield_true", input: []*commonpb.KeyValuePair{{Key: EnableDynamicSchemaKey, Value: "true"}}, expectFound: true, expectValue: true},
+		{tag: "dynamicfield_false", input: []*commonpb.KeyValuePair{{Key: EnableDynamicSchemaKey, Value: "false"}}, expectFound: true, expectValue: false},
+		{tag: "bad_kv_value", input: []*commonpb.KeyValuePair{{Key: EnableDynamicSchemaKey, Value: "abc"}}, expectFound: true, expectError: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			found, value, err := IsEnableDynamicSchema(tc.input)
+			if tc.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.expectFound, found)
+			assert.Equal(t, tc.expectValue, value)
+		})
+	}
+}
+
+func TestAllocAutoID(t *testing.T) {
+	start, end, err := AllocAutoID(func(n uint32) (int64, int64, error) {
+		return 100, 110, nil
+	}, 10, 1)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0b0100, start>>60)
+	assert.EqualValues(t, 0b0100, end>>60)
+}
+
+func TestAllocAutoIDN(t *testing.T) {
+	// clusterID bits are applied to the high bits, same as AllocAutoID.
+	start, end, err := AllocAutoIDN(func(n int64) (int64, int64, error) {
+		return 100, 100 + n, nil
+	}, 10, 1)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0b0100, start>>60)
+	assert.EqualValues(t, 0b0100, end>>60)
+
+	// A count exceeding math.MaxUint32 is passed through in one allocation
+	// (the uint32 limitation of AllocAutoID does not apply here).
+	bigN := int64(1)<<32 + 1000
+	var got int64
+	s, e, err := AllocAutoIDN(func(n int64) (int64, int64, error) {
+		got = n
+		return 0, n, nil
+	}, bigN, 0) // clusterID 0 => no high bits set
+	assert.NoError(t, err)
+	assert.Equal(t, bigN, got)
+	assert.Equal(t, bigN, e-s)
+
+	// Non-positive count is a no-op and never calls allocFunc.
+	s, e, err = AllocAutoIDN(func(n int64) (int64, int64, error) {
+		t.Fatal("allocFunc must not be called for n<=0")
+		return 0, 0, nil
+	}, 0, 1)
+	assert.NoError(t, err)
+	assert.Zero(t, s)
+	assert.Zero(t, e)
+}
+
+func TestFunctionProperty(t *testing.T) {
+	assert.False(t, GetCollectionAllowInsertNonBM25FunctionOutputs([]*commonpb.KeyValuePair{}))
+	assert.False(t, GetCollectionAllowInsertNonBM25FunctionOutputs(
+		[]*commonpb.KeyValuePair{{Key: "other", Value: "test"}}),
+	)
+	assert.False(t, GetCollectionAllowInsertNonBM25FunctionOutputs(
+		[]*commonpb.KeyValuePair{{Key: CollectionAllowInsertNonBM25FunctionOutputs, Value: "false"}}),
+	)
+	assert.False(t, GetCollectionAllowInsertNonBM25FunctionOutputs(
+		[]*commonpb.KeyValuePair{{Key: CollectionAllowInsertNonBM25FunctionOutputs, Value: "test"}}),
+	)
+	assert.True(t, GetCollectionAllowInsertNonBM25FunctionOutputs(
+		[]*commonpb.KeyValuePair{{Key: CollectionAllowInsertNonBM25FunctionOutputs, Value: "true"}}),
+	)
+}
+
+func TestIsDisableFuncRuntimeCheck(t *testing.T) {
+	disable, err := IsDisableFuncRuntimeCheck([]*commonpb.KeyValuePair{}...)
+	assert.NoError(t, err)
+	assert.False(t, disable)
+	disable, err = IsDisableFuncRuntimeCheck([]*commonpb.KeyValuePair{{Key: DisableFuncRuntimeCheck, Value: "False"}}...)
+	assert.NoError(t, err)
+	assert.False(t, disable)
+	disable, err = IsDisableFuncRuntimeCheck([]*commonpb.KeyValuePair{{Key: DisableFuncRuntimeCheck, Value: "True"}}...)
+	assert.NoError(t, err)
+	assert.True(t, disable)
+	disable, err = IsDisableFuncRuntimeCheck([]*commonpb.KeyValuePair{{Key: DisableFuncRuntimeCheck, Value: "Error"}}...)
+	assert.Error(t, err)
+	assert.False(t, disable)
+}
+
+func TestGetCollectionTTL(t *testing.T) {
+	type testCase struct {
+		tag       string
+		value     string
+		expect    time.Duration
+		expectErr bool
+	}
+
+	cases := []testCase{
+		{tag: "normal_case", value: "3600", expect: time.Duration(3600) * time.Second, expectErr: false},
+		{tag: "error_value", value: "error value", expectErr: true},
+		{tag: "out_of_int64_range", value: "10000000000000000000000000000000000000000000000000000000000000000000000000000", expectErr: true},
+		{tag: "negative", value: "-1", expect: -1 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			result, err := GetCollectionTTL([]*commonpb.KeyValuePair{{Key: CollectionTTLConfigKey, Value: tc.value}})
+			if tc.expectErr {
+				assert.Error(t, err)
+			} else {
+				assert.EqualValues(t, tc.expect, result)
+			}
+			result, err = GetCollectionTTLFromMap(map[string]string{CollectionTTLConfigKey: tc.value})
+			if tc.expectErr {
+				assert.Error(t, err)
+			} else {
+				assert.EqualValues(t, tc.expect, result)
+			}
+		})
+	}
+
+	t.Run("not_config", func(t *testing.T) {
+		result, err := GetCollectionTTL([]*commonpb.KeyValuePair{})
+		assert.NoError(t, err)
+		assert.EqualValues(t, -1, result)
+		result, err = GetCollectionTTLFromMap(map[string]string{})
+		assert.NoError(t, err)
+		assert.EqualValues(t, -1, result)
+	})
+}
+
+func TestWarmupPolicy(t *testing.T) {
+	t.Run("GetWarmupPolicy", func(t *testing.T) {
+		// Test when warmup key exists
+		props := []*commonpb.KeyValuePair{
+			{Key: WarmupKey, Value: WarmupSync},
+		}
+		policy, exist := GetWarmupPolicy(props...)
+		assert.True(t, exist)
+		assert.Equal(t, WarmupSync, policy)
+
+		// Test when warmup key doesn't exist
+		props = []*commonpb.KeyValuePair{
+			{Key: "other_key", Value: "other_value"},
+		}
+		policy, exist = GetWarmupPolicy(props...)
+		assert.False(t, exist)
+		assert.Equal(t, "", policy)
+
+		// Test empty props
+		policy, exist = GetWarmupPolicy()
+		assert.False(t, exist)
+		assert.Equal(t, "", policy)
+	})
+
+	t.Run("GetWarmupPolicyByKey", func(t *testing.T) {
+		props := []*commonpb.KeyValuePair{
+			{Key: WarmupScalarFieldKey, Value: WarmupSync},
+			{Key: WarmupVectorIndexKey, Value: WarmupDisable},
+		}
+
+		// Test getting scalar field warmup
+		policy, exist := GetWarmupPolicyByKey(WarmupScalarFieldKey, props...)
+		assert.True(t, exist)
+		assert.Equal(t, WarmupSync, policy)
+
+		// Test getting vector index warmup
+		policy, exist = GetWarmupPolicyByKey(WarmupVectorIndexKey, props...)
+		assert.True(t, exist)
+		assert.Equal(t, WarmupDisable, policy)
+
+		// Test key not found
+		policy, exist = GetWarmupPolicyByKey(WarmupScalarIndexKey, props...)
+		assert.False(t, exist)
+		assert.Equal(t, "", policy)
+	})
+
+	t.Run("ValidateWarmupPolicy", func(t *testing.T) {
+		// Valid values
+		assert.NoError(t, ValidateWarmupPolicy(WarmupSync))
+		assert.NoError(t, ValidateWarmupPolicy(WarmupDisable))
+		assert.NoError(t, ValidateWarmupPolicy(WarmupAsync))
+
+		// Invalid values
+		assert.Error(t, ValidateWarmupPolicy("invalid"))
+		assert.Error(t, ValidateWarmupPolicy(""))
+	})
+
+	t.Run("IsWarmupKey", func(t *testing.T) {
+		// Valid warmup keys
+		assert.True(t, IsWarmupKey(WarmupKey))
+		assert.True(t, IsWarmupKey(WarmupScalarFieldKey))
+		assert.True(t, IsWarmupKey(WarmupScalarIndexKey))
+		assert.True(t, IsWarmupKey(WarmupVectorFieldKey))
+		assert.True(t, IsWarmupKey(WarmupVectorIndexKey))
+
+		// Invalid keys
+		assert.False(t, IsWarmupKey("warmup.invalid"))
+		assert.False(t, IsWarmupKey("other_key"))
+		assert.False(t, IsWarmupKey(""))
+	})
+
+	t.Run("IsFieldWarmupKey", func(t *testing.T) {
+		// Only WarmupKey is a field-level warmup key
+		assert.True(t, IsFieldWarmupKey(WarmupKey))
+
+		// Collection-level warmup keys are not field-level
+		assert.False(t, IsFieldWarmupKey(WarmupScalarFieldKey))
+		assert.False(t, IsFieldWarmupKey(WarmupScalarIndexKey))
+		assert.False(t, IsFieldWarmupKey(WarmupVectorFieldKey))
+		assert.False(t, IsFieldWarmupKey(WarmupVectorIndexKey))
+
+		// Invalid keys
+		assert.False(t, IsFieldWarmupKey("warmup.invalid"))
+		assert.False(t, IsFieldWarmupKey("other_key"))
+		assert.False(t, IsFieldWarmupKey(""))
+	})
+
+	t.Run("IsCollectionWarmupKey", func(t *testing.T) {
+		// Collection-level warmup keys
+		assert.True(t, IsCollectionWarmupKey(WarmupScalarFieldKey))
+		assert.True(t, IsCollectionWarmupKey(WarmupScalarIndexKey))
+		assert.True(t, IsCollectionWarmupKey(WarmupVectorFieldKey))
+		assert.True(t, IsCollectionWarmupKey(WarmupVectorIndexKey))
+
+		// WarmupKey is field-level, not collection-level
+		assert.False(t, IsCollectionWarmupKey(WarmupKey))
+
+		// Invalid keys
+		assert.False(t, IsCollectionWarmupKey("warmup.invalid"))
+		assert.False(t, IsCollectionWarmupKey("other_key"))
+		assert.False(t, IsCollectionWarmupKey(""))
+	})
+}
+
+func TestQueryMode(t *testing.T) {
+	t.Run("GetQueryMode returns mode when set", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: QueryModeKey, Value: "large_topk"},
+		}
+		assert.Equal(t, QueryModeLargeTopK, GetQueryMode(kvs...))
+	})
+
+	t.Run("GetQueryMode is case sensitive", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: QueryModeKey, Value: "Large_TopK"},
+		}
+		assert.NotEqual(t, QueryModeLargeTopK, GetQueryMode(kvs...))
+		assert.Equal(t, "Large_TopK", GetQueryMode(kvs...))
+	})
+
+	t.Run("GetQueryMode returns empty when not present", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: "other.key", Value: "large_topk"},
+		}
+		assert.Equal(t, "", GetQueryMode(kvs...))
+	})
+
+	t.Run("GetQueryMode returns empty for no kvs", func(t *testing.T) {
+		assert.Equal(t, "", GetQueryMode())
+	})
+
+	t.Run("IsQueryModeLargeTopK returns true", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: QueryModeKey, Value: "large_topk"},
+		}
+		assert.True(t, IsQueryModeLargeTopK(kvs...))
+	})
+
+	t.Run("IsQueryModeLargeTopK returns false when not set", func(t *testing.T) {
+		assert.False(t, IsQueryModeLargeTopK())
+	})
+
+	t.Run("ValidateQueryMode accepts large_topk", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: QueryModeKey, Value: "large_topk"},
+		}
+		assert.NoError(t, ValidateQueryMode(kvs...))
+	})
+
+	t.Run("ValidateQueryMode accepts missing key", func(t *testing.T) {
+		assert.NoError(t, ValidateQueryMode())
+	})
+
+	t.Run("ValidateQueryMode rejects invalid value", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: QueryModeKey, Value: "invalid"},
+		}
+		assert.Error(t, ValidateQueryMode(kvs...))
+	})
+
+	t.Run("ValidateQueryMode rejects wrong case value", func(t *testing.T) {
+		for _, val := range []string{"LARGE_TOPK", "Large_TopK", "Large_Topk"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: QueryModeKey, Value: val},
+			}
+			err := ValidateQueryMode(kvs...)
+			assert.Error(t, err, "value %q should be rejected", val)
+			assert.Contains(t, err.Error(), "valid values")
+		}
+	})
+
+	t.Run("ValidateQueryMode rejects wrong case key", func(t *testing.T) {
+		for _, key := range []string{"QUERY_MODE", "Query_Mode", "Query_mode"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: key, Value: "large_topk"},
+			}
+			err := ValidateQueryMode(kvs...)
+			assert.Error(t, err, "key %q should be rejected", key)
+			assert.Contains(t, err.Error(), "did you mean")
+		}
+	})
+}
+
+func TestNamespaceShardingEnabled(t *testing.T) {
+	t.Run("IsNamespaceShardingEnabled returns value when set", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: NamespaceShardingEnabledKey, Value: "true"},
+		}
+		enabled, err := IsNamespaceShardingEnabled(kvs...)
+		assert.NoError(t, err)
+		assert.True(t, enabled)
+	})
+
+	t.Run("IsNamespaceShardingEnabled defaults to false", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: "other.key", Value: "true"},
+		}
+		enabled, err := IsNamespaceShardingEnabled(kvs...)
+		assert.NoError(t, err)
+		assert.False(t, enabled)
+		enabled, err = IsNamespaceShardingEnabled()
+		assert.NoError(t, err)
+		assert.False(t, enabled)
+	})
+
+	t.Run("IsNamespaceShardingEnabledKeyExists returns true", func(t *testing.T) {
+		kvs := []*commonpb.KeyValuePair{
+			{Key: NamespaceShardingEnabledKey, Value: "false"},
+		}
+		assert.True(t, IsNamespaceShardingEnabledKeyExists(kvs...))
+	})
+
+	t.Run("IsNamespaceShardingEnabledKeyExists returns false when not set", func(t *testing.T) {
+		assert.False(t, IsNamespaceShardingEnabledKeyExists())
+	})
+
+	t.Run("ValidateNamespaceShardingEnabled accepts true and false", func(t *testing.T) {
+		for _, val := range []string{"true", "false"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: NamespaceShardingEnabledKey, Value: val},
+			}
+			assert.NoError(t, ValidateNamespaceShardingEnabled(kvs...), "value %q should be accepted", val)
+		}
+	})
+
+	t.Run("ValidateNamespaceShardingEnabled accepts missing key", func(t *testing.T) {
+		assert.NoError(t, ValidateNamespaceShardingEnabled())
+	})
+
+	t.Run("ValidateNamespaceShardingEnabled rejects invalid values", func(t *testing.T) {
+		for _, val := range []string{"invalid", "True", "FALSE", "1", "0"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: NamespaceShardingEnabledKey, Value: val},
+			}
+			err := ValidateNamespaceShardingEnabled(kvs...)
+			assert.Error(t, err, "value %q should be rejected", val)
+			assert.Contains(t, err.Error(), "valid values")
+			assert.Contains(t, err.Error(), "namespace.sharding.enabled")
+		}
+	})
+
+	t.Run("ValidateNamespaceShardingEnabled rejects wrong case key", func(t *testing.T) {
+		for _, key := range []string{"NAMESPACE.SHARDING.ENABLED", "Namespace.Sharding.Enabled", "Namespace.sharding.enabled"} {
+			kvs := []*commonpb.KeyValuePair{
+				{Key: key, Value: "true"},
+			}
+			err := ValidateNamespaceShardingEnabled(kvs...)
+			if assert.Error(t, err, "key %q should be rejected", key) {
+				assert.Contains(t, err.Error(), "did you mean")
+			}
+		}
+	})
+
+	t.Run("ValidateNamespaceShardingEnabledNotAltered rejects update", func(t *testing.T) {
+		err := ValidateNamespaceShardingEnabledNotAltered(
+			[]*commonpb.KeyValuePair{{Key: NamespaceShardingEnabledKey, Value: "true"}},
+			nil,
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot alter namespace.sharding.enabled")
+	})
+
+	t.Run("ValidateNamespaceShardingEnabledNotAltered rejects delete", func(t *testing.T) {
+		err := ValidateNamespaceShardingEnabledNotAltered(nil, []string{NamespaceShardingEnabledKey})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot delete namespace.sharding.enabled")
+	})
+
+	t.Run("ValidateNamespaceShardingEnabledNotAltered rejects wrong case update", func(t *testing.T) {
+		err := ValidateNamespaceShardingEnabledNotAltered(
+			[]*commonpb.KeyValuePair{{Key: "Namespace.Sharding.Enabled", Value: "true"}},
+			nil,
+		)
+		if assert.Error(t, err) {
+			assert.Contains(t, err.Error(), "did you mean")
+		}
+	})
+
+	t.Run("ValidateNamespaceShardingEnabledNotAltered rejects wrong case delete", func(t *testing.T) {
+		err := ValidateNamespaceShardingEnabledNotAltered(nil, []string{"Namespace.Sharding.Enabled"})
+		if assert.Error(t, err) {
+			assert.Contains(t, err.Error(), "did you mean")
+		}
+	})
+
+	t.Run("ValidateNamespaceShardingEnabledNotAltered accepts unrelated changes", func(t *testing.T) {
+		err := ValidateNamespaceShardingEnabledNotAltered(
+			[]*commonpb.KeyValuePair{{Key: "other.key", Value: "true"}},
+			[]string{"other.deleted.key"},
+		)
+		assert.NoError(t, err)
+	})
+}
+
+func TestClampScalarIndexVersion(t *testing.T) {
+	max := MaximumScalarIndexEngineVersion
+
+	// Values at or below maximum pass through unchanged
+	assert.Equal(t, int32(0), ClampScalarIndexVersion(0))
+	assert.Equal(t, int32(1), ClampScalarIndexVersion(1))
+	assert.Equal(t, max, ClampScalarIndexVersion(max))
+
+	// Values above maximum are clamped
+	assert.Equal(t, max, ClampScalarIndexVersion(max+1))
+	assert.Equal(t, max, ClampScalarIndexVersion(max+100))
+}
+
+func TestWKTWKBConversion(t *testing.T) {
+	testCases := []struct {
+		name string
+		wkt  string
+	}{
+		{"Point Empty", "POINT EMPTY"},
+		{"Polygon Empty", "POLYGON EMPTY"},
+		{"Point with coords", "POINT (1 2)"},
+		{"Polygon with coords", "POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			wkb, err := ConvertWKTToWKB(tc.wkt)
+			assert.NoError(t, err)
+			assert.NotNil(t, wkb)
+
+			wktResult, err := ConvertWKBToWKT(wkb)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wkt, wktResult)
+		})
+	}
+}
+
+// TestInternalStorageRootSegmentsIsExhaustive fails when a storage path
+// constant is added to common.go without being classified as either a
+// top-level directory under the storage root (-> InternalStorageRootSegments)
+// or explicitly not one (-> nonTopLevelSegments below).
+//
+// InternalStorageRootSegments is consumed by import path validation in
+// datacoord: anything listed there is refused as an ordinary import target.
+// A missing entry silently reopens a path that import must not read, so the
+// classification is enforced here rather than left to review.
+func TestInternalStorageRootSegmentsIsExhaustive(t *testing.T) {
+	// Constants in the same const block that are deliberately NOT top-level
+	// directories under the storage root. Value is the reason, for readers.
+	nonTopLevelSegments := map[string]string{
+		"OffsetMapping":            "leaf file name under analyze_stats/, already covered by AnalyzeStatsPath",
+		"Centroids":                "leaf file name under analyze_stats/, already covered by AnalyzeStatsPath",
+		"DefaultResourceGroupName": "not a storage path at all",
+	}
+
+	// Both registries count as classified: the split between them is about WHEN
+	// a segment is denied (every storage type vs local only), not about whether
+	// it is a top-level internal directory.
+	registered := make(map[string]struct{},
+		len(InternalStorageRootSegments)+len(LocalOnlyStorageRootSegments))
+	for _, seg := range InternalStorageRootSegments {
+		registered[seg] = struct{}{}
+	}
+	for _, seg := range LocalOnlyStorageRootSegments {
+		if _, dup := registered[seg]; dup {
+			assert.Fail(t, "segment listed in both registries", seg)
+		}
+		registered[seg] = struct{}{}
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "common.go", nil, 0)
+	require.NoError(t, err)
+
+	checked := 0
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.CONST {
+			continue
+		}
+		if !constBlockDeclares(genDecl, "SegmentInsertLogPath") {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, ident := range valueSpec.Names {
+				// Fail rather than skip on anything this guard cannot read. A
+				// silently skipped constant is never classified, yet leaves
+				// checked/registered/nonTopLevelSegments balanced, so the
+				// assertion below still passes -- exactly the outcome the guard
+				// exists to prevent.
+				if !assert.Less(t, i, len(valueSpec.Values),
+					"%s has no value of its own (implicit repetition); this guard cannot classify it. "+
+						"Give it an explicit string literal.", ident.Name) {
+					continue
+				}
+				lit, ok := valueSpec.Values[i].(*ast.BasicLit)
+				if !assert.True(t, ok && lit.Kind == token.STRING,
+					"%s is not a plain string literal; this guard cannot classify it. "+
+						"Use a literal, or move it out of this const block and classify it by hand.",
+					ident.Name) {
+					continue
+				}
+				value, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+
+				checked++
+				if _, excluded := nonTopLevelSegments[ident.Name]; excluded {
+					_, alsoRegistered := registered[value]
+					assert.False(t, alsoRegistered,
+						"%s is marked as not top-level but is also in InternalStorageRootSegments", ident.Name)
+					continue
+				}
+				_, ok = registered[value]
+				assert.True(t, ok,
+					"storage path constant %s (%q) is neither in InternalStorageRootSegments "+
+						"nor in nonTopLevelSegments. Classify it: if it is a top-level directory "+
+						"under the storage root, add it to InternalStorageRootSegments so import "+
+						"path validation refuses it; otherwise add it to nonTopLevelSegments here "+
+						"with the reason.", ident.Name, value)
+			}
+		}
+	}
+
+	require.NotZero(t, checked, "found no string constants in the storage path const block; "+
+		"the block was probably renamed or split, and this guard is no longer checking anything")
+	assert.Equal(t, len(registered)+len(nonTopLevelSegments), checked,
+		"const block size and classification lists disagree")
+}
+
+// constBlockDeclares reports whether genDecl declares a constant with the given name.
+func constBlockDeclares(genDecl *ast.GenDecl, name string) bool {
+	for _, spec := range genDecl.Specs {
+		valueSpec, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, ident := range valueSpec.Names {
+			if ident.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -1,0 +1,80 @@
+use rust_stemmers::Algorithm;
+use tantivy::tokenizer::*;
+
+use super::filter::stop_words;
+use super::filter::Stemmer;
+use super::filter::*;
+use super::options::FileResourcePathHelper;
+use super::tokenizers::*;
+
+// default build-in analyzer
+pub(crate) fn standard_analyzer(stop_words: Vec<String>) -> TextAnalyzer {
+    let builder = standard_builder().filter(LowerCaser);
+
+    if stop_words.len() > 0 {
+        return builder.filter(StopWordFilter::remove(stop_words)).build();
+    }
+
+    builder.build()
+}
+
+pub fn chinese_analyzer(
+    stop_words: Vec<String>,
+    helper: &mut FileResourcePathHelper,
+) -> TextAnalyzer {
+    let builder = jieba_builder(None, helper)
+        .unwrap()
+        .filter(CnAlphaNumOnlyFilter);
+    if stop_words.len() > 0 {
+        return builder.filter(StopWordFilter::remove(stop_words)).build();
+    }
+
+    builder.build()
+}
+
+pub fn arabic_analyzer(stop_words: Vec<String>) -> TextAnalyzer {
+    let builder = standard_builder()
+        .filter(LowerCaser)
+        .filter(DecimalDigitFilter)
+        .filter(ArabicNormalizationFilter)
+        .filter(Stemmer::new(Algorithm::Arabic))
+        .filter(StopWordFilter::remove(
+            stop_words::ARABIC.iter().map(|&word| word.to_owned()),
+        ));
+
+    if stop_words.len() > 0 {
+        return builder.filter(StopWordFilter::remove(stop_words)).build();
+    }
+
+    builder.build()
+}
+
+pub fn thai_analyzer(stop_words: Vec<String>) -> TextAnalyzer {
+    let builder = thai_builder()
+        .filter(LowerCaser)
+        .filter(DecimalDigitFilter)
+        .filter(StopWordFilter::remove(
+            stop_words::THAI.iter().map(|&word| word.to_owned()),
+        ));
+
+    if stop_words.len() > 0 {
+        return builder.filter(StopWordFilter::remove(stop_words)).build();
+    }
+
+    builder.build()
+}
+
+pub fn english_analyzer(stop_words: Vec<String>) -> TextAnalyzer {
+    let builder = standard_builder()
+        .filter(LowerCaser)
+        .filter(Stemmer::new(Algorithm::English))
+        .filter(StopWordFilter::remove(
+            stop_words::ENGLISH.iter().map(|&word| word.to_owned()),
+        ));
+
+    if stop_words.len() > 0 {
+        return builder.filter(StopWordFilter::remove(stop_words)).build();
+    }
+
+    builder.build()
+}

@@ -1,0 +1,403 @@
+# Copyright (C) 2019-2023 Zilliz. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License
+
+cmake_minimum_required(VERSION 3.26.4 FATAL_ERROR)
+project(knowhere CXX C)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules/")
+include(GNUInstallDirs)
+include(ExternalProject)
+include(cmake/utils/utils.cmake)
+include(cmake/utils/compile_flags.cmake)
+include(cmake/utils/platform_check.cmake)
+
+# cardinal is an enterprise vector search engine and can only be enabled for
+# cloud environment
+knowhere_option(WITH_CARDINAL "Build with cardinal" OFF)
+knowhere_option(WITH_GPU "Build with GPU support (cuVS or Cardinal)" OFF)
+knowhere_option(WITH_CUVS "Build with CUVS indexes" OFF)
+# Select the GPU backend through WITH_CARDINAL.
+# Keep this as a local value so an implicit cuVS selection is not cached when
+# reconfiguring the same build directory for Cardinal.
+if(WITH_GPU AND NOT WITH_CARDINAL)
+  set(WITH_CUVS ON)
+endif()
+
+if(WITH_CUVS OR (WITH_CARDINAL AND WITH_GPU))
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    if(WITH_CARDINAL AND WITH_GPU)
+      set(CMAKE_CUDA_ARCHITECTURES "120")
+    else()
+      set(CMAKE_CUDA_ARCHITECTURES RAPIDS)
+    endif()
+  endif()
+endif()
+
+if(WITH_CUVS)
+  set(CMAKE_CUDA_STANDARD 20)
+  include(cmake/libs/librapids.cmake)
+  project(knowhere CXX C CUDA)
+  include(cmake/libs/libcuvs.cmake)
+elseif(WITH_CARDINAL AND WITH_GPU)
+  enable_language(CUDA)
+endif()
+
+knowhere_option(WITH_UT "Build with UT test" OFF)
+knowhere_option(WITH_C_API "Build the public C API" OFF)
+knowhere_option(WITH_JNI "Build Java JNI bindings" OFF)
+knowhere_option(WITH_C_API_TESTS "Build C API contract tests" OFF)
+if(WITH_JNI)
+  set(WITH_C_API ON)
+endif()
+if(WITH_C_API_TESTS AND NOT WITH_C_API)
+  message(FATAL_ERROR "WITH_C_API_TESTS requires WITH_C_API or WITH_JNI")
+endif()
+knowhere_option(WITH_ASAN "Build with ASAN" OFF)
+knowhere_option(WITH_DISKANN "Build with diskann index" OFF)
+knowhere_option(WITH_SVS "Build with SVS (Intel Scalable Vector Search) index" OFF)
+knowhere_option(WITH_BENCHMARK "Build with benchmark" OFF)
+knowhere_option(WITH_COVERAGE "Build with coverage" OFF)
+knowhere_option(WITH_CCACHE "Build with ccache" ON)
+knowhere_option(WITH_PROFILER "Build with profiler" OFF)
+knowhere_option(WITH_FAISS_TESTS "Build with Faiss unit tests" OFF)
+knowhere_option(WITH_LIGHT "Build with light weight version" OFF)
+knowhere_option(WITH_COMPILE_PRUNE "Enable compile prune" ON)
+
+
+set(KNOWHERE_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+set(KNOWHERE_THRID_ROOT ${KNOWHERE_ROOT}/thirdparty)
+
+knowhere_option(CARDINAL_VERSION_FORCE_CHECKOUT
+                "Force checkout cardinal version" OFF)
+
+if(KNOWHERE_VERSION)
+  message(STATUS "Building KNOWHERE version: ${KNOWHERE_VERSION}")
+  add_definitions(-DKNOWHERE_VERSION=${KNOWHERE_VERSION})
+endif()
+
+if(WITH_CCACHE)
+  find_program(CCACHE_FOUND ccache)
+  if(CCACHE_FOUND)
+    message(STATUS "Using ccache: ${CCACHE_FOUND}")
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ${CCACHE_FOUND})
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ${CCACHE_FOUND})
+    # let ccache preserve C++ comments, because some of them may be meaningful
+    # to the compiler
+    set(ENV{CCACHE_COMMENTS} "1")
+
+    # Set ccache environment variables
+    set(ENV{CCACHE_DIR} "$ENV{HOME}/.ccache")
+    set(ENV{CCACHE_MAXSIZE} "2G")
+    set(ENV{CCACHE_COMPRESS} "1")
+    set(ENV(CCACHE_COMPRESSLEVEL) "5")
+  endif()
+endif()
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_BINARY_DIR}/)
+
+add_definitions(-DNOT_COMPILE_FOR_SWIG)
+
+if(WITH_LIGHT)
+  add_definitions(-DKNOWHERE_WITH_LIGHT)
+endif()
+
+find_package(Boost REQUIRED)
+include_directories(${Boost_INCLUDE_DIRS})
+
+find_package(OpenMP REQUIRED)
+
+find_package(folly REQUIRED)
+include_directories(${folly_INCLUDE_DIRS})
+
+find_package(nlohmann_json REQUIRED)
+find_package(glog REQUIRED)
+find_package(prometheus-cpp REQUIRED)
+find_package(fmt REQUIRED)
+if(NOT TARGET fmt::fmt-header-only)
+    add_library(fmt::fmt-header-only INTERFACE IMPORTED)
+    target_link_libraries(fmt::fmt-header-only INTERFACE fmt::fmt)
+endif()
+find_package(xxHash REQUIRED)
+include_directories(${xxHash_INCLUDE_DIRS})
+find_package(simde REQUIRED)
+
+if(NOT WITH_LIGHT)
+  find_package(opentelemetry-cpp REQUIRED)
+  include_directories(${opentelemetry-cpp_INCLUDE_DIRS})
+  add_definitions(-DOPENTELEMETRY_STL_VERSION=2017)
+  if(TARGET opentelemetry-cpp::opentelemetry_exporter_otlp_grpc)
+    add_definitions(-DHAVE_OTLP_GRPC_EXPORTER)
+  endif()
+endif()
+
+if(APPLE)
+  # Prevent SDK sysroot include dir from appearing as -I/-isystem in compile
+  # commands. Transitive find_package calls (CURL, ZLIB, etc.) resolve headers
+  # to the SDK sysroot, and the explicit -I flag breaks C++ wrapper headers
+  # (cinttypes, cstdio, etc.) that rely on #include_next search order.
+  # The compiler already searches this path implicitly.
+  execute_process(COMMAND xcrun --show-sdk-path OUTPUT_VARIABLE _SDK_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+  list(APPEND CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES "${_SDK_PATH}/usr/include")
+  list(APPEND CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES "${_SDK_PATH}/usr/include")
+endif()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_OSX_DEPLOYMENT_TARGET
+    "10.15"
+    CACHE STRING "Minimum OS X deployment version" FORCE)
+
+if(OPENMP_FOUND)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS
+      "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+endif()
+
+include(cmake/utils/platform_check.cmake)
+include(cmake/utils/compile_flags.cmake)
+find_package(milvus-common REQUIRED)
+include(cmake/libs/libhnsw.cmake)
+include(cmake/libs/libfaiss.cmake)
+
+if(WITH_COVERAGE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
+endif()
+
+if(NOT WITH_LIGHT)
+  knowhere_file_glob(
+    GLOB_RECURSE
+    KNOWHERE_SRCS
+    src/common/*.cc
+    src/index/*.cc
+    src/cluster/*.cc
+    src/io/*.cc
+    src/common/*.cu
+    src/index/*.cu
+    src/io/*.cu)
+endif()
+
+if(WITH_LIGHT)
+  knowhere_file_glob(
+    GLOB_RECURSE
+    KNOWHERE_SRCS
+    src/common/*.cc
+    src/index/ivf/ivf.cc
+    src/index/index_node_data_mock_wrapper.cc
+    src/index/index_static.cc
+    src/index/index.cc
+    src/index/interrupt.cc
+    src/index/sparse/*.cc
+    src/io/*.cc
+    src/index/index_factory.cc)
+  knowhere_file_glob(GLOB_RECURSE KNOWHERE_TRACER_SRCS src/common/tracer.cc)
+  list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_TRACER_SRCS})
+endif()
+
+set(KNOWHERE_PRIVATE_LIBS "")
+set(CARDINAL_LIBS "")
+
+if(WITH_DISKANN)
+  add_definitions(-DKNOWHERE_WITH_DISKANN)
+  include(cmake/libs/libdiskann.cmake)
+else()
+  knowhere_file_glob(GLOB_RECURSE KNOWHERE_DISKANN_SRCS src/index/diskann/*.cc)
+  list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_DISKANN_SRCS})
+endif()
+
+if(WITH_CARDINAL)
+  add_definitions(-DKNOWHERE_WITH_CARDINAL)
+  add_subdirectory(cmake/libs/cardinal/v1)
+  list(APPEND CARDINAL_LIBS cardinalv1)
+  add_subdirectory(cmake/libs/cardinal/v2)
+  list(APPEND CARDINAL_LIBS cardinalv2)
+endif()
+
+# Sparse codec C files (not captured by *.cc globs)
+knowhere_file_glob(GLOB KNOWHERE_SPARSE_CODEC_SRCS
+    src/index/sparse/codec/*.c)
+list(APPEND KNOWHERE_SRCS ${KNOWHERE_SPARSE_CODEC_SRCS})
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|amd64)")
+    set_source_files_properties(
+        src/index/sparse/codec/varintdecode.c
+        src/index/sparse/codec/streamvbyte_0124_decode.c
+        src/index/sparse/codec/streamvbyte_0124_encode.c
+        PROPERTIES COMPILE_FLAGS "-msse4.1")
+    set_source_files_properties(
+        src/index/sparse/sindi_simd_avx2.cc
+        PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
+    set_source_files_properties(
+        src/index/sparse/sindi_simd_avx512.cc
+        PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512vl -mavx512dq -mavx512cd -mavx2 -mfma -mf16c")
+endif()
+
+if(__LOONGARCH64)
+    set_source_files_properties(
+        src/index/sparse/codec/varintdecode.c
+        src/index/sparse/codec/streamvbyte_0124_decode.c
+        src/index/sparse/codec/streamvbyte_0124_encode.c
+        src/index/sparse/codec/simd_bitpacking_kernel.c
+        src/index/sparse/sindi_simd_lsx.cc
+        PROPERTIES COMPILE_OPTIONS "-mlsx;-mno-lasx")
+endif()
+
+if(__AARCH64)
+    set(KNOWHERE_SVE_COMPILE_OPTIONS "")
+    if(HAS_ARMV9_SVE_BF16)
+        set(KNOWHERE_SVE_COMPILE_OPTIONS "-march=armv9-a+sve+bf16")
+    elseif(HAS_ARMV8_SVE_BF16)
+        set(KNOWHERE_SVE_COMPILE_OPTIONS "-march=armv8-a+sve+bf16")
+    elseif(HAS_ARMV9_SVE)
+        set(KNOWHERE_SVE_COMPILE_OPTIONS "-march=armv9-a+sve")
+    elseif(HAS_ARMV8_SVE)
+        set(KNOWHERE_SVE_COMPILE_OPTIONS "-march=armv8-a+sve")
+    endif()
+
+    if(KNOWHERE_SVE_COMPILE_OPTIONS)
+        set_source_files_properties(
+            src/index/sparse/sindi_simd_sve.cc
+            PROPERTIES
+                COMPILE_OPTIONS "${KNOWHERE_SVE_COMPILE_OPTIONS}"
+                COMPILE_DEFINITIONS KNOWHERE_USE_SVE)
+        set_source_files_properties(
+            src/index/sparse/sindi_simd.cc
+            PROPERTIES COMPILE_DEFINITIONS KNOWHERE_USE_SVE)
+    endif()
+endif()
+
+if(WITH_SVS)
+  if(NOT __X86_64)
+    message(FATAL_ERROR "SVS is only supported on x86_64 platforms")
+  endif()
+  add_definitions(-DKNOWHERE_WITH_SVS)
+else()
+  knowhere_file_glob(GLOB_RECURSE KNOWHERE_SVS_SRCS src/index/svs/*.cc)
+  list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_SVS_SRCS})
+endif()
+
+knowhere_file_glob(GLOB_RECURSE KNOWHERE_GPU_SRCS src/index/gpu/flat_gpu/*.cc
+                   src/index/gpu/ivf_gpu/*.cc)
+list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_GPU_SRCS})
+
+if(NOT WITH_CUVS)
+  knowhere_file_glob(GLOB_RECURSE KNOWHERE_CUVS_SRCS src/common/cuvs/*.cu
+                     src/common/cuvs/*.cc src/index/gpu_cuvs/*.cc)
+  list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_CUVS_SRCS})
+endif()
+
+include_directories(src)
+include_directories(include)
+
+list(APPEND KNOWHERE_PRIVATE_LIBS faiss)
+list(APPEND KNOWHERE_PRIVATE_LIBS prometheus-cpp::push)
+list(APPEND KNOWHERE_PRIVATE_LIBS fmt::fmt)
+list(APPEND KNOWHERE_PRIVATE_LIBS simde::simde)
+
+set(KNOWHERE_PUBLIC_LIBS
+    Boost::boost
+    nlohmann_json::nlohmann_json
+    glog::glog
+    Folly::folly
+    milvus-common::milvus-common
+    prometheus-cpp::core
+    opentelemetry-cpp::opentelemetry_trace
+    OpenMP::OpenMP_CXX)
+
+add_library(knowhere SHARED ${KNOWHERE_SRCS})
+if(WITH_CUVS)
+  list(
+    APPEND
+    KNOWHERE_PRIVATE_LIBS
+    raft::raft
+    cuvs::cuvs
+    CUDA::cublas
+    CUDA::cusparse
+    CUDA::cusolver)
+endif()
+
+target_link_libraries(knowhere
+    PRIVATE ${KNOWHERE_PRIVATE_LIBS}
+    PUBLIC ${KNOWHERE_PUBLIC_LIBS})
+target_compile_features(knowhere PUBLIC cxx_std_20)
+
+if (WITH_CARDINAL)
+  target_compile_definitions(knowhere PRIVATE
+    SPARSE_INDEX_VERSION_USE_RAW_DATA_THRESHOLD=7
+    SPARSE_INDEX_VERSION_SUPPORT_FP16_QUANT_FOR_IP=0)
+  target_link_libraries(knowhere PRIVATE "-Wl,--no-as-needed" ${CARDINAL_LIBS} "-Wl,--as-needed")
+endif()
+
+target_include_directories(knowhere PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(knowhere PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/faiss)
+
+if(WITH_UT)
+  find_package(Catch2 REQUIRED)
+  add_subdirectory(tests/ut)
+endif()
+
+if(WITH_BENCHMARK)
+  add_subdirectory(benchmark)
+endif()
+
+if(WITH_FAISS_TESTS)
+  add_subdirectory(tests/faiss)
+endif()
+
+install(TARGETS knowhere
+        DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/knowhere"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+if(WITH_C_API)
+  include(cmake/binding_licenses.cmake)
+  knowhere_collect_binding_licenses("${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}" "${WITH_DISKANN}")
+  add_library(knowhere_c SHARED src/c_api/c_api.cc)
+  target_link_libraries(knowhere_c PRIVATE knowhere)
+  target_include_directories(knowhere_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_definitions(knowhere_c PRIVATE KNOWHERE_C_API_BUILD)
+  set_target_properties(knowhere_c PROPERTIES VERSION 1.0.0 SOVERSION 1
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+  if(APPLE)
+    set_target_properties(knowhere_c PROPERTIES INSTALL_RPATH "@loader_path")
+  else()
+    set_target_properties(knowhere_c PROPERTIES INSTALL_RPATH "$ORIGIN")
+  endif()
+  install(TARGETS knowhere_c LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  if(WITH_C_API_TESTS)
+    enable_testing()
+    add_executable(knowhere_c_api_test tests/c_api/test_c_api.c)
+    target_link_libraries(knowhere_c_api_test PRIVATE knowhere_c)
+    add_test(NAME knowhere_c_api COMMAND knowhere_c_api_test)
+    find_package(Threads REQUIRED)
+    add_executable(knowhere_c_api_concurrency_test tests/c_api/test_concurrency.c)
+    target_link_libraries(knowhere_c_api_concurrency_test PRIVATE knowhere_c Threads::Threads)
+    add_test(NAME knowhere_c_api_concurrency COMMAND knowhere_c_api_concurrency_test)
+    if(WITH_DISKANN)
+      add_executable(knowhere_c_api_diskann_test tests/c_api/test_diskann.c)
+      target_link_libraries(knowhere_c_api_diskann_test PRIVATE knowhere_c)
+      add_test(NAME knowhere_c_api_diskann COMMAND knowhere_c_api_diskann_test)
+      set_tests_properties(knowhere_c_api_diskann PROPERTIES TIMEOUT 300)
+    endif()
+    if(WITH_ASAN)
+      foreach(test_target knowhere_c_api_test knowhere_c_api_concurrency_test knowhere_c_api_diskann_test)
+        if(TARGET ${test_target})
+          target_compile_options(${test_target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+          target_link_options(${test_target} PRIVATE -fsanitize=address)
+        endif()
+      endforeach()
+    endif()
+  endif()
+endif()
+
+if(WITH_JNI)
+  add_subdirectory(java)
+endif()

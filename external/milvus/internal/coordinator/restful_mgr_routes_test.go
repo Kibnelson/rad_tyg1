@@ -1,0 +1,709 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package coordinator
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	pkgconfig "github.com/milvus-io/milvus/pkg/v3/config"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+)
+
+func TestMalformedConfigRequestLogsDoNotContainPayload(t *testing.T) {
+	paramtable.Init()
+	coord := &mixCoordImpl{}
+	for _, test := range []struct {
+		name    string
+		handler http.HandlerFunc
+		body    string
+	}{
+		{"wal", coord.HandleAlterWAL, `{"target_wal_name":"kafka","config":{"sasl.password":"payload-canary","key-canary":!}}`},
+		{"config", coord.HandleAlterConfig, `{"configs":[{"key":"key-canary","value":"payload-canary","bad":!}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := mlog.CaptureGlobalLogs(t, &mlog.Config{Level: "debug"})
+			request := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(test.body))
+			response := httptest.NewRecorder()
+			test.handler(response, request)
+			assert.Equal(t, http.StatusBadRequest, response.Code)
+			assert.Contains(t, response.Body.String(), "Invalid request body")
+			assert.Contains(t, sink.String(), "failed to decode request body")
+			assert.NotContains(t, sink.String(), "payload-canary")
+			assert.NotContains(t, sink.String(), "key-canary")
+		})
+	}
+}
+
+func TestHandleAlterConfig(t *testing.T) {
+	paramtable.Init()
+	mgr := paramtable.GetBaseTable().Manager()
+
+	// Verify etcd source is available (requires external etcd running)
+	_, hasEtcd := mgr.GetEtcdSource()
+	require.True(t, hasEtcd, "etcd source is required for this test, ensure etcd is running")
+
+	// Mark some keys as immutable for testing
+	mgr.ImmutableUpdate("test.immutable.key1")
+	for _, key := range []string{
+		"test.alter.config.key1",
+		"test.alter.config.legacy",
+		"test.alter.config.empty",
+		"test.alter.config.reset_me",
+		"test.alter.mixed.keep",
+		"test.alter.mixed.remove",
+		"test.alter.config.key2",
+		"test.alter.config.key3",
+		"test.immutable.key1",
+	} {
+		mgr.RegisterConfigKey(key)
+	}
+
+	coord := &mixCoordImpl{}
+
+	t.Run("single config update", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.key1", "value": "value1"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var resp map[string]string
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		assert.Equal(t, "OK", resp["msg"])
+
+		assert.Eventually(t, func() bool {
+			_, value, err := mgr.GetConfig("test.alter.config.key1")
+			return err == nil && value == "value1"
+		}, time.Second*10, 100*time.Millisecond)
+	})
+
+	t.Run("legacy single-key format", func(t *testing.T) {
+		reqBody := map[string]string{
+			"key":   "test.alter.config.legacy",
+			"value": "legacy_value",
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, value, err := mgr.GetConfig("test.alter.config.legacy")
+			return err == nil && value == "legacy_value"
+		}, time.Second*10, 100*time.Millisecond)
+	})
+
+	t.Run("set config with empty value", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.empty", "value": ""},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		coord.HandleAlterConfig(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, value, err := mgr.GetConfig("test.alter.config.empty")
+			return err == nil && value == ""
+		}, time.Second*10, 100*time.Millisecond)
+	})
+
+	t.Run("reset config by omitting value", func(t *testing.T) {
+		// First set a value
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.reset_me", "value": "to_be_reset"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		coord.HandleAlterConfig(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, value, err := mgr.GetConfig("test.alter.config.reset_me")
+			return err == nil && value == "to_be_reset"
+		}, time.Second*10, 100*time.Millisecond)
+
+		// Reset by omitting value (value is null/absent → delete from etcd)
+		reqBody = map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.reset_me"},
+			},
+		}
+		body, _ = json.Marshal(reqBody)
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w = httptest.NewRecorder()
+		coord.HandleAlterConfig(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("mixed update and reset in one request", func(t *testing.T) {
+		// Setup: write two configs
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.mixed.keep", "value": "old_value"},
+				{"key": "test.alter.mixed.remove", "value": "to_remove"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		coord.HandleAlterConfig(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, v1, err1 := mgr.GetConfig("test.alter.mixed.keep")
+			_, v2, err2 := mgr.GetConfig("test.alter.mixed.remove")
+			return err1 == nil && v1 == "old_value" && err2 == nil && v2 == "to_remove"
+		}, time.Second*10, 100*time.Millisecond)
+
+		// Atomically: update one, reset (delete) the other
+		reqBody = map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.mixed.keep", "value": "new_value"},
+				{"key": "test.alter.mixed.remove"}, // no value → reset
+			},
+		}
+		body, _ = json.Marshal(reqBody)
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w = httptest.NewRecorder()
+		coord.HandleAlterConfig(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, v, err := mgr.GetConfig("test.alter.mixed.keep")
+			return err == nil && v == "new_value"
+		}, time.Second*10, 100*time.Millisecond)
+	})
+
+	t.Run("multiple configs atomic update", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.key1", "value": "atomic_value1"},
+				{"key": "test.alter.config.key2", "value": "atomic_value2"},
+				{"key": "test.alter.config.key3", "value": "atomic_value3"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		assert.Eventually(t, func() bool {
+			_, v1, err1 := mgr.GetConfig("test.alter.config.key1")
+			_, v2, err2 := mgr.GetConfig("test.alter.config.key2")
+			_, v3, err3 := mgr.GetConfig("test.alter.config.key3")
+			return err1 == nil && v1 == "atomic_value1" &&
+				err2 == nil && v2 == "atomic_value2" &&
+				err3 == nil && v3 == "atomic_value3"
+		}, time.Second*10, 100*time.Millisecond)
+	})
+
+	t.Run("empty configs array should fail", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "configs array is required")
+	})
+
+	t.Run("missing key should fail", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"value": "value_without_key"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "non-empty key")
+	})
+
+	t.Run("duplicate keys should fail", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.alter.config.key1", "value": "value1"},
+				{"key": "test.alter.config.key1", "value": "value2"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "duplicate key")
+	})
+
+	t.Run("mqtype config should fail", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "mq.type", "value": "pulsar"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "mqtype configuration cannot be modified")
+		assert.Contains(t, w.Body.String(), "alterWAL endpoint")
+	})
+
+	t.Run("immutable config should fail", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": "test.immutable.key1", "value": "value"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "immutable configuration cannot be modified")
+	})
+
+	t.Run("kafka producer message max bytes should be immutable", func(t *testing.T) {
+		key := paramtable.Get().KafkaCfg.ProducerMessageMaxBytes.Key
+		require.True(t, mgr.IsImmutable(key))
+
+		reqBody := map[string]interface{}{
+			"configs": []map[string]interface{}{
+				{"key": key, "value": "20971520"},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "immutable configuration cannot be modified")
+	})
+
+	t.Run("wrong HTTP method should fail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/config/alter", nil)
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.Contains(t, w.Body.String(), "Method not allowed")
+	})
+
+	t.Run("invalid JSON should fail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/alter", bytes.NewReader([]byte("invalid json")))
+		w := httptest.NewRecorder()
+
+		coord.HandleAlterConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "Invalid request body")
+	})
+}
+
+func TestHandleGetConfig(t *testing.T) {
+	paramtable.Init()
+	mgr := paramtable.GetBaseTable().Manager()
+
+	coord := &mixCoordImpl{}
+
+	// Seed configs directly via Manager (no etcd needed). Scalars go through
+	// SetConfig; ParamGroup members go through SetMapConfig, which keeps the
+	// dotted identity a file or etcd source would have given them.
+	scalars := map[string]string{
+		"test.getconfig.key1":   "val1",
+		"test.getconfig.key2":   "val2",
+		"test.getconfig.key3":   "val3",
+		"test.getconfig.opaque": "opaque-secret",
+		"pulsar.authParams":     "token:broker-secret",
+		"AWS_SECRET_ACCESS_KEY": "environment-secret",
+	}
+	groupMembers := map[string]string{ // #nosec G101 -- synthetic credentials exercise management-response redaction
+		"credential.aksk1.secret_access_key":             "param-group-secret",
+		"kafka.consumer.ssl.key.pem":                     "inline-private-key",
+		"function.analyzer.lindera.download_urls.ipadic": "https://example.invalid/dict",
+	}
+	for key, value := range scalars {
+		mgr.SetConfig(key, value)
+	}
+	for key, value := range groupMembers {
+		mgr.SetMapConfig(key, value)
+	}
+	t.Cleanup(func() {
+		// This manager is the process-global paramtable; leaving these behind
+		// would leak into every other test in the package.
+		for key := range scalars {
+			mgr.ResetConfig(key)
+		}
+		for key := range groupMembers {
+			mgr.ResetConfig(key)
+		}
+	})
+	for _, key := range []string{"test.getconfig.key1", "test.getconfig.key2", "test.getconfig.key3", "test.getconfig.opaque"} {
+		mgr.RegisterConfigKey(key)
+	}
+	mgr.RegisterSensitiveKey("test.getconfig.opaque")
+
+	type configResult struct {
+		Key    string `json:"key"`
+		Value  string `json:"value,omitempty"`
+		Source string `json:"source,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	parseResponse := func(t *testing.T, w *httptest.ResponseRecorder) []configResult {
+		var resp struct {
+			Configs []configResult `json:"configs"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		return resp.Configs
+	}
+
+	t.Run("get single key", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.key1", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 1)
+		assert.Equal(t, "test.getconfig.key1", configs[0].Key)
+		assert.Equal(t, "val1", configs[0].Value)
+		assert.NotEmpty(t, configs[0].Source)
+		assert.Empty(t, configs[0].Error)
+	})
+
+	t.Run("get multiple keys preserves order", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.key3,test.getconfig.key1,test.getconfig.key2", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 3)
+		assert.Equal(t, "test.getconfig.key3", configs[0].Key)
+		assert.Equal(t, "val3", configs[0].Value)
+		assert.Equal(t, "test.getconfig.key1", configs[1].Key)
+		assert.Equal(t, "val1", configs[1].Value)
+		assert.Equal(t, "test.getconfig.key2", configs[2].Key)
+		assert.Equal(t, "val2", configs[2].Value)
+	})
+
+	t.Run("nonexistent key returns error field", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.nonexistent", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 1)
+		assert.Equal(t, "test.getconfig.nonexistent", configs[0].Key)
+		assert.NotEmpty(t, configs[0].Error)
+		assert.Empty(t, configs[0].Value)
+		assert.Empty(t, configs[0].Source)
+	})
+
+	t.Run("mix of existing and nonexistent keys", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.key1,test.getconfig.missing,test.getconfig.key2", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 3)
+		assert.Equal(t, "test.getconfig.key1", configs[0].Key)
+		assert.Equal(t, "val1", configs[0].Value)
+		assert.Empty(t, configs[0].Error)
+		assert.Equal(t, "test.getconfig.missing", configs[1].Key)
+		assert.NotEmpty(t, configs[1].Error)
+		assert.Equal(t, "test.getconfig.key2", configs[2].Key)
+		assert.Equal(t, "val2", configs[2].Value)
+		assert.Empty(t, configs[2].Error)
+	})
+
+	t.Run("empty keys with spaces and commas are skipped", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.key1,,+,test.getconfig.key2", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 2)
+		assert.Equal(t, "test.getconfig.key1", configs[0].Key)
+		assert.Equal(t, "test.getconfig.key2", configs[1].Key)
+	})
+
+	t.Run("missing keys parameter should fail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "keys")
+	})
+
+	t.Run("group member is readable after Remove and Save", func(t *testing.T) {
+		const key = "test.getconfig.group.member"
+		mgr.RegisterConfigPrefix("test.getconfig.group.")
+		mgr.SetMapConfig(key, "old-value")
+		t.Cleanup(func() { mgr.ResetConfig(key) })
+		base := paramtable.GetBaseTable()
+		require.NoError(t, base.Remove(key))
+		require.NoError(t, base.Save(key, "restored-value"))
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys="+key, nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 1)
+		assert.Equal(t, key, configs[0].Key)
+		assert.Equal(t, "restored-value", configs[0].Value)
+		assert.Equal(t, pkgconfig.RuntimeSource, configs[0].Source)
+		assert.Empty(t, configs[0].Error)
+	})
+
+	t.Run("missing sensitive keys return errors", func(t *testing.T) {
+		const scalar = "test.getconfig.missing.sensitive"
+		mgr.RegisterConfigKey(scalar)
+		mgr.RegisterSensitiveKey(scalar)
+		keys := []string{scalar, "credential.getconfig.missing"}
+		for _, key := range keys {
+			_, _, err := mgr.GetConfig(key)
+			require.ErrorIs(t, err, pkgconfig.ErrKeyNotFound)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys="+strings.Join(keys, ","), nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, len(keys))
+		for i, result := range configs {
+			assert.Equal(t, keys[i], result.Key)
+			assert.Contains(t, result.Error, "key not found")
+			assert.Empty(t, result.Value)
+			assert.Empty(t, result.Source)
+		}
+	})
+
+	t.Run("sensitive keys are redacted", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=minio.secretAccessKey,test.getconfig.key1,etcd.auth.password,test.getconfig.opaque", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 4)
+		assert.Equal(t, pkgconfig.RedactedValue, configs[0].Value)
+		assert.Empty(t, configs[0].Error)
+		assert.Equal(t, "val1", configs[1].Value)
+		assert.Equal(t, pkgconfig.RedactedValue, configs[2].Value)
+		assert.Empty(t, configs[2].Error)
+		assert.Equal(t, pkgconfig.RedactedValue, configs[3].Value)
+		assert.Empty(t, configs[3].Error)
+		assert.NotContains(t, w.Body.String(), "opaque-secret")
+	})
+
+	t.Run("sensitive ParamGroup members are redacted and undeclared keys are denied", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=credential.aksk1.secret_access_key,kafka.consumer.ssl.key.pem,pulsar.authParams,AWS_SECRET_ACCESS_KEY,function.analyzer.lindera.download_urls.ipadic,kafkaconsumersslkeypem", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 6)
+		for _, index := range []int{0, 1, 2, 4, 5} {
+			assert.Equal(t, pkgconfig.RedactedValue, configs[index].Value)
+			assert.Empty(t, configs[index].Error)
+		}
+		// A process environment variable is not declared configuration even when
+		// its name looks sensitive, so its key remains unregistered.
+		assert.Contains(t, configs[3].Error, "unregistered")
+		// The collapsed ParamGroup spelling at index 5 and the topology value at
+		// index 4 are both covered by the redaction assertions above.
+		assert.NotContains(t, w.Body.String(), "param-group-secret")
+		assert.NotContains(t, w.Body.String(), "inline-private-key")
+		assert.NotContains(t, w.Body.String(), "broker-secret")
+		assert.NotContains(t, w.Body.String(), "environment-secret")
+	})
+
+	t.Run("unregistered keys are denied", func(t *testing.T) {
+		mgr.SetConfig("test.getconfig.unknown", "unknown-secret")
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=test.getconfig.unknown", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		configs := parseResponse(t, w)
+		require.Len(t, configs, 1)
+		assert.Contains(t, configs[0].Error, "unregistered")
+		assert.NotContains(t, w.Body.String(), "unknown-secret")
+	})
+
+	t.Run("all empty keys should fail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management/config/get?keys=,,+,", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "no valid keys")
+	})
+
+	t.Run("wrong HTTP method should fail", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/management/config/get?keys=test.getconfig.key1", nil)
+		w := httptest.NewRecorder()
+		coord.HandleGetConfig(w, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.Contains(t, w.Body.String(), "Method not allowed")
+	})
+}
+
+func TestNewAlterWALBroadcastMessage(t *testing.T) {
+	clusterChannels := message.ClusterChannels{
+		Channels:       []string{"pchannel1", "pchannel2"},
+		ControlChannel: "pchannel1_vcchan",
+	}
+
+	msg, err := newAlterWALBroadcastMessage(
+		commonpb.WALName_Pulsar,
+		map[string]string{"pulsar.address": "pulsar://localhost:6650"},
+		clusterChannels,
+	)
+	require.NoError(t, err)
+
+	// A local WAL migration must not be replayed on a secondary cluster.
+	assert.True(t, msg.IsUnreplicable())
+	// The ack callback writes mq.type into etcd, so it must wait for the streaming
+	// nodes to consume the message instead of being fast-acked at append time.
+	require.NotNil(t, msg.BroadcastHeader())
+	assert.True(t, msg.BroadcastHeader().AckSyncUp)
+
+	// Both properties must survive the split into per-pchannel messages.
+	msg.WithBroadcastID(1)
+	splitMsgs := msg.SplitIntoMutableMessage()
+	require.Len(t, splitMsgs, 2)
+	for _, splitMsg := range splitMsgs {
+		assert.True(t, splitMsg.IsUnreplicable())
+		assert.True(t, splitMsg.BroadcastHeader().AckSyncUp)
+	}
+}
+
+// This endpoint is itself behind common.security.adminAuthEnabled, so while
+// that flag is off anyone who can reach port 9091 -- the exposure the flag
+// exists to close -- could use it to plant "false" in etcd, which outranks the
+// yaml an operator later edits. The rejection has to survive every spelling
+// that lands on the same stored key, which is why the guard shares
+// config.FormatKey rather than normalizing by hand.
+//
+// No etcd needed: the guard answers before the request reaches a source.
+func TestHandleAlterConfigRefusesTheAdminAuthGate(t *testing.T) {
+	paramtable.Init()
+	coord := &mixCoordImpl{}
+	key := paramtable.Get().CommonCfg.AdminAuthEnabled.Key
+
+	for _, spelling := range []string{
+		key,
+		"common_security_adminAuthEnabled",
+		"common/security/adminAuthEnabled",
+		"COMMON.SECURITY.ADMINAUTHENABLED",
+		"commonsecurityadminauthenabled",
+	} {
+		t.Run(spelling, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"configs": []map[string]any{{"key": spelling, "value": "false"}},
+			})
+			require.NoError(t, err)
+			w := httptest.NewRecorder()
+			coord.HandleAlterConfig(w,
+				httptest.NewRequest(http.MethodPost, "/management/config/alter", bytes.NewReader(body)))
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), key)
+		})
+	}
+
+	// A reset (value omitted) is the same attack with a different shape.
+	body, err := json.Marshal(map[string]any{
+		"configs": []map[string]any{{"key": "common_security_adminAuthEnabled"}},
+	})
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	coord.HandleAlterConfig(w,
+		httptest.NewRequest(http.MethodPost, "/management/config/alter", bytes.NewReader(body)))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// The mqtype guard is spelling-sensitive for the same reason.
+	for _, spelling := range []string{"mq.type", "mq_type", "mqType"} {
+		body, err := json.Marshal(map[string]any{
+			"configs": []map[string]any{{"key": spelling, "value": "kafka"}},
+		})
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		coord.HandleAlterConfig(w,
+			httptest.NewRequest(http.MethodPost, "/management/config/alter", bytes.NewReader(body)))
+		assert.Equal(t, http.StatusBadRequest, w.Code, spelling)
+	}
+}

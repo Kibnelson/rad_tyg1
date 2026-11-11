@@ -1,0 +1,1199 @@
+"""Tests for search and query Prepare methods."""
+
+import numpy as np
+import orjson
+import pytest
+from pymilvus import DataType, Function, FunctionType
+from pymilvus.client.abstract import BaseRanker
+from pymilvus.client.constants import QUERY_ITER_LAST_ELEMENT_OFFSET, QUERY_ITER_LAST_PK
+from pymilvus.client.prepare import Prepare
+from pymilvus.client.types import PlaceholderType
+from pymilvus.exceptions import ParamError
+from pymilvus.grpc_gen import common_pb2 as common_types
+from pymilvus.orm.schema import FunctionScore, LexicalHighlighter
+
+
+class TestSearchRequestsWithExpr:
+    """Tests for search_requests_with_expr."""
+
+    @pytest.fixture
+    def basic_search_params(self):
+        """Basic search parameters."""
+        return {"metric_type": "L2", "params": {"nprobe": 10}}
+
+    def test_search_with_data(self, basic_search_params):
+        """Test search with vector data."""
+        data = [[1.0, 2.0, 3.0, 4.0]]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+        )
+        assert req.collection_name == "test"
+        assert req.nq == 1
+
+    def test_search_with_ids(self, basic_search_params):
+        """Test search with IDs instead of vectors."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            ids=[1, 2, 3],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+        )
+        assert req.collection_name == "test"
+        assert req.nq == 3
+
+    def test_search_neither_data_nor_ids(self, basic_search_params):
+        """Test search without data or ids raises error."""
+        with pytest.raises(ValueError, match="Either data or ids"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+            )
+
+    def test_search_invalid_params_type(self):
+        """Test search with non-dict params."""
+        with pytest.raises(ParamError, match="must be a dict"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param={"params": "invalid"},
+                limit=10,
+            )
+
+    def test_search_page_retain_order_both_kwargs_and_param(self, basic_search_params):
+        """Test page_retain_order in both kwargs and param raises error."""
+        basic_search_params["page_retain_order"] = True
+        with pytest.raises(ParamError, match="page_retain_order both in kwargs and param"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                page_retain_order=True,
+            )
+
+    def test_search_page_retain_order_invalid_type(self, basic_search_params):
+        """Test page_retain_order with invalid type."""
+        with pytest.raises(ParamError, match="expect bool"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                page_retain_order="true",
+            )
+
+    def test_search_page_retain_order_kwargs_without_nested_params(self):
+        """Test page_retain_order via kwargs when param has no 'params' key.
+
+        Regression test for #2804: page_retain_order was silently dropped
+        when param dict didn't contain a nested "params" key, because the
+        local variable was written to a temporary dict not stored back in param.
+        """
+        param = {"metric_type": "L2"}
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=param,
+            limit=10,
+            page_retain_order=True,
+        )
+        # Extract the "params" value from the protobuf search_params
+        params_dict = None
+        for kv in req.search_params:
+            if kv.key == "params":
+                params_dict = orjson.loads(kv.value)
+                break
+        assert params_dict is not None, "params key missing from search_params"
+        assert (
+            "page_retain_order" in params_dict
+        ), "page_retain_order was lost when param has no nested 'params' key"
+        assert params_dict["page_retain_order"] is True
+
+    def test_search_offset_both_kwargs_and_param(self, basic_search_params):
+        """Test offset in both kwargs and param raises error."""
+        basic_search_params["offset"] = 10
+        with pytest.raises(ParamError, match="offset both in kwargs and param"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                offset=20,
+            )
+
+    def test_search_offset_invalid_type(self, basic_search_params):
+        """Test offset with invalid type."""
+        with pytest.raises(ParamError, match="expect int"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                offset="10",
+            )
+
+    @pytest.mark.parametrize(
+        "iterator_key,value",
+        [
+            pytest.param("is_iterator", True, id="iterator"),
+            pytest.param("collection_id", 123, id="collection_id"),
+            pytest.param("iter_search_v2", True, id="iter_v2"),
+            pytest.param("iter_search_batch_size", 100, id="batch_size"),
+            pytest.param("iter_search_last_bound", 0.5, id="last_bound"),
+            pytest.param("iter_search_id", "test_id", id="iter_id"),
+        ],
+    )
+    def test_search_iterator_params(self, basic_search_params, iterator_key, value):
+        """Test search with various iterator parameters."""
+        kwargs = {iterator_key: value}
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            **kwargs,
+        )
+        assert req is not None
+
+    def test_search_with_cluster_id_param(self, basic_search_params):
+        """Test search carries cluster_id in search_params."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            cluster_id="in07-xxx",
+        )
+        params = {kv.key: kv.value for kv in req.search_params}
+        assert params["cluster_id"] == "in07-xxx"
+
+    @pytest.mark.parametrize(
+        "group_key,value",
+        [
+            pytest.param("group_by_field", "category", id="group_by"),
+            pytest.param("group_size", 5, id="group_size"),
+            pytest.param("strict_group_size", True, id="strict_group"),
+        ],
+    )
+    def test_search_group_params(self, basic_search_params, group_key, value):
+        """Test search with grouping parameters."""
+        kwargs = {group_key: value}
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            **kwargs,
+        )
+        assert req is not None
+
+    def test_search_order_by_fields_list(self, basic_search_params):
+        """Test search with order_by_fields as list of dicts."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            order_by_fields=[{"field": "score", "order": "desc"}],
+        )
+        assert req is not None
+
+    def test_search_order_by_fields_missing_field(self, basic_search_params):
+        """Test order_by_fields without 'field' key raises error."""
+        with pytest.raises(ParamError, match="'field' key is required"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                order_by_fields=[{"order": "desc"}],
+            )
+
+    def test_search_order_by_fields_empty_field(self, basic_search_params):
+        """Test order_by_fields with empty 'field' raises error."""
+        with pytest.raises(ParamError, match="'field' key is required"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                order_by_fields=[{"field": "", "order": "desc"}],
+            )
+
+    def test_search_order_by_fields_invalid_item(self, basic_search_params):
+        """Test order_by_fields with non-dict item raises error."""
+        with pytest.raises(ParamError, match="expect dict"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                order_by_fields=["invalid"],
+            )
+
+    def test_search_order_by_fields_string(self, basic_search_params):
+        """Test order_by_fields as string."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            order_by_fields="score:desc",
+        )
+        assert req is not None
+
+    @pytest.mark.parametrize(
+        "json_type,expected",
+        [
+            pytest.param(DataType.INT8, "Int8", id="int8"),
+            pytest.param(DataType.INT16, "Int16", id="int16"),
+            pytest.param(DataType.INT32, "Int32", id="int32"),
+            pytest.param(DataType.INT64, "Int64", id="int64"),
+            pytest.param(DataType.BOOL, "Bool", id="bool"),
+            pytest.param(DataType.VARCHAR, "VarChar", id="varchar"),
+            pytest.param(DataType.STRING, "VarChar", id="string"),
+        ],
+    )
+    def test_search_json_type_casting(self, basic_search_params, json_type, expected):
+        """Test search with JSON type casting."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            json_path="$.field",
+            json_type=json_type,
+        )
+        assert req is not None
+
+    def test_search_json_type_unsupported(self, basic_search_params):
+        """Test search with unsupported JSON type."""
+        with pytest.raises(ParamError, match="Unsupported json cast type"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                json_path="$.field",
+                json_type=DataType.FLOAT_VECTOR,
+            )
+
+    def test_search_with_expr(self, basic_search_params):
+        """Test search with filter expression."""
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            expr="id > 100",
+        )
+        assert req.dsl == "id > 100"
+
+    def test_search_with_function_ranker(self, basic_search_params):
+        """Test search with Function ranker."""
+        ranker = Function(
+            "bm25",
+            FunctionType.RERANK,
+            input_field_names=["text"],
+            output_field_names=[],
+            params={"k": 1.2},
+        )
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            ranker=ranker,
+        )
+        assert req.function_score is not None
+
+    def test_search_with_function_score_ranker(self, basic_search_params):
+        """Test search with FunctionScore ranker."""
+        func = Function(
+            "bm25",
+            FunctionType.RERANK,
+            input_field_names=["text"],
+            output_field_names=[],
+            params={"k": 1.2},
+        )
+        ranker = FunctionScore(functions=[func], params={"mode": "multiply"})
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            ranker=ranker,
+        )
+        assert req.function_score is not None
+
+    def test_search_with_invalid_ranker(self, basic_search_params):
+        """Test search with invalid ranker type."""
+        with pytest.raises(ParamError, match="must be a Function or FunctionScore"):
+            Prepare.search_requests_with_expr(
+                collection_name="test",
+                data=[[1.0, 2.0]],
+                anns_field="vector",
+                param=basic_search_params,
+                limit=10,
+                ranker="invalid",
+            )
+
+    def test_search_with_highlighter(self, basic_search_params):
+        """Test search with highlighter."""
+        highlighter = LexicalHighlighter(pre_tags=["<em>"], post_tags=["</em>"])
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            highlighter=highlighter,
+        )
+        assert req.highlighter is not None
+
+    @pytest.mark.parametrize(
+        "extra_params",
+        [
+            pytest.param({"hints": "hint_value"}, id="hints"),
+            pytest.param({"analyzer_name": "standard"}, id="analyzer"),
+            pytest.param({"timezone": "UTC"}, id="timezone"),
+            pytest.param({"time_fields": "timestamp"}, id="time_fields"),
+            pytest.param({"strict_cast": True}, id="strict_cast"),
+        ],
+    )
+    def test_search_with_extra_params(self, basic_search_params, extra_params):
+        """Test search with various extra parameters."""
+        if "hints" in extra_params:
+            basic_search_params["hints"] = extra_params["hints"]
+            extra_params = {}
+        elif "analyzer_name" in extra_params:
+            basic_search_params["analyzer_name"] = extra_params["analyzer_name"]
+            extra_params = {}
+
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=[[1.0, 2.0]],
+            anns_field="vector",
+            param=basic_search_params,
+            limit=10,
+            **extra_params,
+        )
+        assert req is not None
+
+
+class TestBuildIdsProto:
+    """Tests for _build_ids_proto."""
+
+    def test_empty_ids(self):
+        """Test with empty ids list."""
+        with pytest.raises(ParamError, match="must not be empty"):
+            Prepare._build_ids_proto([])
+
+    def test_boolean_id(self):
+        """Test with boolean id raises error."""
+        with pytest.raises(ParamError, match="must not contain boolean"):
+            Prepare._build_ids_proto([True, False])
+
+    def test_int_ids(self):
+        """Test with integer ids."""
+        result = Prepare._build_ids_proto([1, 2, 3])
+        assert result.int_id.data == [1, 2, 3]
+
+    def test_numpy_int_ids(self):
+        """Test with numpy integer ids."""
+        result = Prepare._build_ids_proto([np.int64(1), np.int64(2)])
+        assert result.int_id.data == [1, 2]
+
+    def test_str_ids(self):
+        """Test with string ids."""
+        result = Prepare._build_ids_proto(["a", "b", "c"])
+        assert list(result.str_id.data) == ["a", "b", "c"]
+
+    def test_unsupported_id_type(self):
+        """Test with unsupported id type."""
+        with pytest.raises(ParamError, match="Unsupported id type"):
+            Prepare._build_ids_proto([1.5, 2.5])
+
+
+class TestPrepareExpressionTemplate:
+    """Tests for prepare_expression_template."""
+
+    def test_empty_values(self):
+        """Test with empty values dict."""
+        result = Prepare.prepare_expression_template({})
+        assert len(result) == 0
+
+    def test_bool_value(self):
+        """Test with boolean value."""
+        result = Prepare.prepare_expression_template({"flag": True})
+        assert result["flag"].bool_val is True
+
+    def test_int_value(self):
+        """Test with integer value."""
+        result = Prepare.prepare_expression_template({"count": 42})
+        assert result["count"].int64_val == 42
+
+    def test_float_value(self):
+        """Test with float value."""
+        result = Prepare.prepare_expression_template({"score": 3.14})
+        assert result["score"].float_val == pytest.approx(3.14)
+
+    def test_string_value(self):
+        """Test with string value."""
+        result = Prepare.prepare_expression_template({"name": "test"})
+        assert result["name"].string_val == "test"
+
+    def test_array_of_ints(self):
+        """Test with array of integers."""
+        result = Prepare.prepare_expression_template({"ids": [1, 2, 3]})
+        assert list(result["ids"].array_val.long_data.data) == [1, 2, 3]
+
+    def test_array_of_floats(self):
+        """Test with array of floats."""
+        result = Prepare.prepare_expression_template({"scores": [1.0, 2.0, 3.0]})
+        assert list(result["scores"].array_val.double_data.data) == [1.0, 2.0, 3.0]
+
+    def test_array_of_strings(self):
+        """Test with array of strings."""
+        result = Prepare.prepare_expression_template({"names": ["a", "b", "c"]})
+        assert list(result["names"].array_val.string_data.data) == ["a", "b", "c"]
+
+    def test_array_of_bools(self):
+        """Test with array of booleans."""
+        result = Prepare.prepare_expression_template({"flags": [True, False, True]})
+        assert list(result["flags"].array_val.bool_data.data) == [True, False, True]
+
+    def test_nested_array(self):
+        """Test with nested array."""
+        result = Prepare.prepare_expression_template({"matrix": [[1, 2], [3, 4]]})
+        assert len(result["matrix"].array_val.array_data.data) == 2
+
+    def test_empty_array(self):
+        """Test with empty array."""
+        result = Prepare.prepare_expression_template({"empty": []})
+        # Empty array should still be valid
+        assert "empty" in result
+
+
+class TestPreparePlaceholderStr:
+    """Tests for _prepare_placeholder_str."""
+
+    def test_float_vector(self):
+        """Test with float vectors."""
+        data = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_numpy_float32(self):
+        """Test with numpy float32 arrays."""
+        data = [np.array([1.0, 2.0], dtype=np.float32)]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_numpy_float16(self):
+        """Test with numpy float16 arrays."""
+        data = [np.array([1.0, 2.0], dtype=np.float16)]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_numpy_int8(self):
+        """Test with numpy int8 arrays."""
+        data = [np.array([1, 2], dtype=np.int8)]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_bytes_binary_vector(self):
+        """Test with bytes binary vector."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_string_values(self):
+        """Test with string values for text search."""
+        data = ["query text 1", "query text 2"]
+        result = Prepare._prepare_placeholder_str(data)
+        assert result is not None
+
+    def test_unsupported_numpy_dtype(self):
+        """Test with unsupported numpy dtype."""
+        data = [np.array([1, 2], dtype=np.complex64)]
+        with pytest.raises(ParamError, match="unsupported data type"):
+            Prepare._prepare_placeholder_str(data)
+
+    @pytest.mark.parametrize(
+        "data,expected_type",
+        [
+            pytest.param(
+                [np.array([1.0, 2.0], dtype=np.float32)],
+                PlaceholderType.FloatVector,
+                id="float32",
+            ),
+            pytest.param(
+                [np.array([1.0, 2.0], dtype=np.float64)],
+                PlaceholderType.FloatVector,
+                id="float64",
+            ),
+            pytest.param(
+                [np.array([1.0, 2.0], dtype=np.float16)],
+                PlaceholderType.FLOAT16_VECTOR,
+                id="float16",
+            ),
+            pytest.param(
+                [np.array([1, 2], dtype=np.int8)],
+                PlaceholderType.Int8Vector,
+                id="int8",
+            ),
+            pytest.param(
+                [np.array([1, 2], dtype=np.uint8)],
+                PlaceholderType.BinaryVector,
+                id="uint8",
+            ),
+            pytest.param([{1: 0.5}], PlaceholderType.SparseFloatVector, id="sparse"),
+        ],
+    )
+    def test_registry_backed_placeholder_types(self, data, expected_type):
+        result = Prepare._prepare_placeholder_str(data)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == expected_type
+
+    @pytest.mark.parametrize(
+        "data,expected_type",
+        [
+            pytest.param(
+                [np.array([1.0, 2.0], dtype=np.float32)],
+                PlaceholderType.EmbListFloatVector,
+                id="emb_float32",
+            ),
+            pytest.param(
+                [np.array([1.0, 2.0], dtype=np.float16)],
+                PlaceholderType.EmbListFloat16Vector,
+                id="emb_float16",
+            ),
+            pytest.param(
+                [np.array([1, 2], dtype=np.int8)],
+                PlaceholderType.EmbListInt8Vector,
+                id="emb_int8",
+            ),
+            pytest.param(
+                [np.array([1, 2], dtype=np.uint8)],
+                PlaceholderType.EmbListBinaryVector,
+                id="emb_uint8",
+            ),
+        ],
+    )
+    def test_registry_backed_embedding_list_placeholder_types(self, data, expected_type):
+        result = Prepare._prepare_placeholder_str(data, is_embedding_list=True)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == expected_type
+
+
+class TestSearchRequestsWithSchemaKwarg:
+    """Tests for search_requests_with_expr with schema kwarg to resolve vector type."""
+
+    @pytest.fixture
+    def basic_search_params(self):
+        return {"metric_type": "L2", "params": {"nprobe": 10}}
+
+    def test_bytes_data_with_schema_resolves_vector_type(self, basic_search_params):
+        """Test that bytes data + schema kwarg resolves vector_data_type correctly."""
+        schema = {
+            "fields": [
+                {"name": "id", "type": DataType.INT64},
+                {"name": "vec", "type": DataType.FLOAT16_VECTOR},
+            ]
+        }
+        data = [b"\x01\x02\x03\x04"]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="vec",
+            param=basic_search_params,
+            limit=10,
+            schema=schema,
+        )
+        # Verify the placeholder group uses FLOAT16_VECTOR type (102)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(req.placeholder_group)
+        assert pg.placeholders[0].type == 102
+
+    def test_bytes_data_with_schema_bfloat16(self, basic_search_params):
+        """Test bytes data with schema resolves to BFLOAT16_VECTOR."""
+        schema = {
+            "fields": [
+                {"name": "vec", "type": DataType.BFLOAT16_VECTOR},
+            ]
+        }
+        data = [b"\x01\x02\x03\x04"]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="vec",
+            param=basic_search_params,
+            limit=10,
+            schema=schema,
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(req.placeholder_group)
+        assert pg.placeholders[0].type == 103  # BFLOAT16_VECTOR
+
+    def test_bytes_data_without_schema_falls_back_to_binary(self, basic_search_params):
+        """Test bytes data without schema defaults to BinaryVector."""
+        data = [b"\x01\x02\x03\x04"]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="vec",
+            param=basic_search_params,
+            limit=10,
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(req.placeholder_group)
+        assert pg.placeholders[0].type == 100  # BinaryVector
+
+    def test_bytes_data_with_schema_struct_field(self, basic_search_params):
+        """Test bytes data with schema resolves struct array field."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "items",
+                    "fields": [
+                        {"name": "embedding", "type": DataType.FLOAT16_VECTOR},
+                    ],
+                }
+            ],
+        }
+        data = [b"\x01\x02\x03\x04"]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="items[embedding]",
+            param=basic_search_params,
+            limit=10,
+            schema=schema,
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(req.placeholder_group)
+        assert pg.placeholders[0].type == 102  # FLOAT16_VECTOR
+
+    def test_bytes_data_with_schema_struct_array_binary_vector_field(self, basic_search_params):
+        """Test bytes data resolves a struct array vector sub-field from element_type."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "items",
+                    "fields": [
+                        {
+                            "name": "embedding",
+                            "type": DataType._ARRAY_OF_VECTOR,
+                            "element_type": DataType.BINARY_VECTOR,
+                        },
+                    ],
+                }
+            ],
+        }
+        data = [b"\x01\x02\x03\x04"]
+        req = Prepare.search_requests_with_expr(
+            collection_name="test",
+            data=data,
+            anns_field="items[embedding]",
+            param=basic_search_params,
+            limit=10,
+            schema=schema,
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(req.placeholder_group)
+        assert pg.placeholders[0].type == PlaceholderType.BinaryVector
+
+
+class TestPreparePlaceholderStrBytesVectorType:
+    """Tests for _prepare_placeholder_str with bytes data and vector_data_type."""
+
+    @pytest.mark.parametrize(
+        "vector_data_type,expected_ph_type",
+        [
+            pytest.param(DataType.FLOAT16_VECTOR, 102, id="float16"),
+            pytest.param(DataType.BFLOAT16_VECTOR, 103, id="bfloat16"),
+            pytest.param(DataType.BINARY_VECTOR, 100, id="binary"),
+        ],
+    )
+    def test_bytes_with_vector_data_type(self, vector_data_type, expected_ph_type):
+        """Test bytes input correctly maps to the right PlaceholderType."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(data, vector_data_type=vector_data_type)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == expected_ph_type
+
+    @pytest.mark.parametrize(
+        "vector_data_type,expected_ph_type",
+        [
+            pytest.param(DataType.FLOAT16_VECTOR, 302, id="emb_float16"),
+            pytest.param(DataType.BFLOAT16_VECTOR, 303, id="emb_bfloat16"),
+            pytest.param(DataType.BINARY_VECTOR, 300, id="emb_binary"),
+        ],
+    )
+    def test_bytes_with_embedding_list(self, vector_data_type, expected_ph_type):
+        """Test bytes input with is_embedding_list=True maps to EmbList PlaceholderType."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(
+            data, is_embedding_list=True, vector_data_type=vector_data_type
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == expected_ph_type
+
+    def test_bytes_with_none_vector_data_type(self):
+        """Test bytes input with None vector_data_type falls back to BinaryVector."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(data, vector_data_type=None)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == 100
+
+    def test_bytes_with_none_vector_data_type_embedding_list(self):
+        """Test bytes input with None vector_data_type and is_embedding_list falls back to EmbListBinaryVector."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(
+            data, is_embedding_list=True, vector_data_type=None
+        )
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == 300
+
+    def test_bytes_without_vector_data_type(self):
+        """Test bytes input without vector_data_type (backward compat)."""
+        data = [b"\x01\x02\x03\x04"]
+        result = Prepare._prepare_placeholder_str(data)
+        pg = common_types.PlaceholderGroup()
+        pg.ParseFromString(result)
+        assert pg.placeholders[0].type == 100
+
+
+class TestGetVectorTypeFromSchema:
+    """Tests for _get_vector_type_from_schema helper."""
+
+    def test_regular_field(self):
+        """Test extracting vector type from a regular field."""
+        schema = {
+            "fields": [
+                {"name": "id", "type": DataType.INT64},
+                {"name": "vec", "type": DataType.FLOAT16_VECTOR},
+            ]
+        }
+        result = Prepare._get_vector_type_from_schema(schema, "vec")
+        assert result == DataType.FLOAT16_VECTOR
+
+    def test_regular_field_not_found(self):
+        """Test returns None when field not found."""
+        schema = {"fields": [{"name": "id", "type": DataType.INT64}]}
+        result = Prepare._get_vector_type_from_schema(schema, "vec")
+        assert result is None
+
+    def test_struct_field(self):
+        """Test extracting vector type from a struct array field."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "items",
+                    "fields": [
+                        {"name": "embedding", "type": DataType.FLOAT16_VECTOR},
+                    ],
+                }
+            ],
+        }
+        result = Prepare._get_vector_type_from_schema(schema, "items[embedding]")
+        assert result == DataType.FLOAT16_VECTOR
+
+    def test_struct_array_vector_field_uses_element_type(self):
+        """Test extracting vector type from array-of-vector struct sub-fields."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "items",
+                    "fields": [
+                        {
+                            "name": "embedding",
+                            "type": DataType._ARRAY_OF_VECTOR,
+                            "element_type": DataType.BINARY_VECTOR,
+                        },
+                    ],
+                }
+            ],
+        }
+        result = Prepare._get_vector_type_from_schema(schema, "items[embedding]")
+        assert result == DataType.BINARY_VECTOR
+
+    def test_struct_field_not_found(self):
+        """Test struct field returns None when sub-field not found."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "items",
+                    "fields": [{"name": "other", "type": DataType.FLOAT_VECTOR}],
+                }
+            ],
+        }
+        result = Prepare._get_vector_type_from_schema(schema, "items[embedding]")
+        assert result is None
+
+    def test_struct_name_not_found(self):
+        """Test struct field returns None when struct name not found."""
+        schema = {
+            "fields": [],
+            "struct_array_fields": [
+                {
+                    "name": "other_struct",
+                    "fields": [{"name": "embedding", "type": DataType.FLOAT_VECTOR}],
+                }
+            ],
+        }
+        result = Prepare._get_vector_type_from_schema(schema, "items[embedding]")
+        assert result is None
+
+    def test_empty_schema(self):
+        """Test with empty schema."""
+        result = Prepare._get_vector_type_from_schema({}, "vec")
+        assert result is None
+
+    def test_no_struct_array_fields(self):
+        """Test struct field lookup when no struct_array_fields key."""
+        schema = {"fields": []}
+        result = Prepare._get_vector_type_from_schema(schema, "items[embedding]")
+        assert result is None
+
+
+class TestHybridSearchRequest:
+    """Tests for hybrid_search_request_with_ranker."""
+
+    def test_hybrid_search_with_base_ranker(self):
+        """Test hybrid search with base ranker."""
+
+        class MockRanker(BaseRanker):
+            def dict(self):
+                return {"strategy": "rrf", "k": 60}
+
+        req = Prepare.hybrid_search_request_with_ranker(
+            collection_name="test",
+            reqs=[],
+            rerank=MockRanker(),
+            limit=10,
+        )
+        assert req.collection_name == "test"
+
+    def test_hybrid_search_with_function_ranker(self):
+        """Test hybrid search with Function ranker."""
+        ranker = Function(
+            "rrf",
+            FunctionType.RERANK,
+            input_field_names=[],
+            output_field_names=[],
+            params={"k": 60},
+        )
+        req = Prepare.hybrid_search_request_with_ranker(
+            collection_name="test",
+            reqs=[],
+            rerank=ranker,
+            limit=10,
+        )
+        assert req.function_score is not None
+
+    def test_hybrid_search_invalid_ranker(self):
+        """Test hybrid search with invalid ranker type."""
+        with pytest.raises(ParamError, match="must be a Function or a Ranker"):
+            Prepare.hybrid_search_request_with_ranker(
+                collection_name="test",
+                reqs=[],
+                rerank="invalid",
+                limit=10,
+            )
+
+    @pytest.mark.parametrize(
+        "extra_params",
+        [
+            pytest.param({"rank_group_scorer": "max"}, id="rank_scorer"),
+            pytest.param({"group_by_field": "category"}, id="group_by"),
+            pytest.param({"group_size": 5}, id="group_size"),
+            pytest.param({"strict_group_size": True}, id="strict_group"),
+        ],
+    )
+    def test_hybrid_search_with_extra_params(self, extra_params):
+        """Test hybrid search with various extra parameters."""
+        req = Prepare.hybrid_search_request_with_ranker(
+            collection_name="test",
+            reqs=[],
+            rerank=None,
+            limit=10,
+            **extra_params,
+        )
+        assert req is not None
+
+    def test_hybrid_search_with_cluster_id_rank_param(self):
+        """Test hybrid search carries cluster_id in rank_params."""
+        req = Prepare.hybrid_search_request_with_ranker(
+            collection_name="test",
+            reqs=[],
+            rerank=None,
+            limit=10,
+            cluster_id="in07-xxx",
+        )
+        params = {kv.key: kv.value for kv in req.rank_params}
+        assert params["cluster_id"] == "in07-xxx"
+
+
+class TestQueryRequest:
+    """Tests for query_request."""
+
+    def test_basic_query(self):
+        """Test basic query request."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id", "vector"],
+            partition_names=[],
+        )
+        assert req.collection_name == "test"
+        assert req.expr == "id > 0"
+
+    @pytest.mark.parametrize(
+        "query_params",
+        [
+            pytest.param({"limit": 100}, id="limit"),
+            pytest.param({"offset": 10}, id="offset"),
+            pytest.param({"limit": 100, "offset": 10}, id="limit_offset"),
+            pytest.param({"timezone": "UTC"}, id="timezone"),
+            pytest.param({"time_fields": "timestamp"}, id="time_fields"),
+            pytest.param({"ignore_growing": True}, id="ignore_growing"),
+            pytest.param({"reduce_stop_for_best": True}, id="reduce_stop"),
+            pytest.param({"is_iterator": "true"}, id="iterator"),
+            pytest.param({"collection_id": 123}, id="collection_id"),
+            pytest.param({"cluster_id": "in07-xxx"}, id="cluster_id"),
+        ],
+    )
+    def test_query_with_params(self, query_params):
+        """Test query with various parameters."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            **query_params,
+        )
+        assert req is not None
+
+    def test_query_group_by_fields(self):
+        """Test query with group_by_fields."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            group_by_fields=["category"],  # Use the correct kwarg name
+        )
+        assert req is not None
+
+    def test_query_group_by_fields_invalid_type(self):
+        """Test query with non-list group_by_fields."""
+        with pytest.raises(TypeError):
+            Prepare.query_request(
+                collection_name="test",
+                expr="id > 0",
+                output_fields=["id"],
+                partition_names=[],
+                group_by_fields="category",  # Use the correct kwarg name
+            )
+
+    def test_query_order_by_str_list(self):
+        """Test query ORDER BY with list of strings."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by=["price:asc", "rating:desc"],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:asc,rating:desc"
+
+    def test_query_order_by_dict_list(self):
+        """Test query ORDER BY with list of dicts."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by=[{"field": "price", "order": "asc"}, {"field": "rating", "order": "desc"}],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:asc,rating:desc"
+
+    def test_query_order_by_dict_default_direction(self):
+        """Test query ORDER BY dict defaults to asc."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by=[{"field": "price"}],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:asc"
+
+    def test_query_order_by_plain_string(self):
+        """Test query ORDER BY with a plain string."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by="price:asc,rating:desc",
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:asc,rating:desc"
+
+    def test_query_order_by_fields_key(self):
+        """Test query ORDER BY using the order_by_fields kwarg."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by_fields=["price:desc"],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:desc"
+
+    def test_query_order_by_mixed_list(self):
+        """Test query ORDER BY with mixed str and dict items."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            order_by=["price:asc", {"field": "rating", "order": "desc"}],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params["order_by_fields"] == "price:asc,rating:desc"
+
+    def test_query_no_order_by(self):
+        """Test query without order_by has no order_by_fields param."""
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert "order_by_fields" not in params
+
+    def test_query_iterator_cursor_params(self):
+        req = Prepare.query_request(
+            collection_name="test",
+            expr="id > 0",
+            output_fields=["id"],
+            partition_names=[],
+            **{
+                QUERY_ITER_LAST_PK: 7,
+                QUERY_ITER_LAST_ELEMENT_OFFSET: 2,
+            },
+        )
+        params = {kv.key: kv.value for kv in req.query_params}
+        assert params[QUERY_ITER_LAST_PK] == "7"
+        assert params[QUERY_ITER_LAST_ELEMENT_OFFSET] == "2"
+
+
+class TestFunctionSchemas:
+    """Tests for function score and highlighter schema conversion."""
+
+    def test_highlighter_schema(self):
+        """Test highlighter schema conversion."""
+        highlighter = LexicalHighlighter(
+            pre_tags=["<em>"],
+            post_tags=["</em>"],
+        )
+        result = Prepare.highlighter_schema(highlighter)
+        assert result is not None
+
+    def test_function_score_schema(self):
+        """Test function score schema conversion."""
+        func = Function(
+            "bm25",
+            FunctionType.RERANK,
+            input_field_names=["text"],
+            output_field_names=[],
+            params={"k": 1.2},
+        )
+        score = FunctionScore(
+            functions=[func],
+            params={"mode": "multiply", "config": {"key": "value"}},
+        )
+        result = Prepare.function_score_schema(score)
+        assert len(result.functions) == 1
+
+    def test_ranker_to_function_score(self):
+        """Test ranker to function score conversion."""
+        ranker = Function(
+            "bm25",
+            FunctionType.RERANK,
+            input_field_names=["text"],
+            output_field_names=[],
+            params={"k": 1.2, "config": {"nested": "value"}},
+        )
+        result = Prepare.ranker_to_function_score(ranker)
+        assert len(result.functions) == 1
+
+    def test_common_kv_value_dict(self):
+        """Test common_kv_value with dict."""
+        result = Prepare.common_kv_value({"key": "value"})
+        assert result == '{"key": "value"}'
+
+    def test_common_kv_value_list(self):
+        """Test common_kv_value with list."""
+        result = Prepare.common_kv_value([1, 2, 3])
+        assert result == "[1, 2, 3]"
+
+    def test_common_kv_value_string(self):
+        """Test common_kv_value with string."""
+        result = Prepare.common_kv_value("test")
+        assert result == "test"
+
+
+class TestDummyRequest:
+    """Tests for dummy_request."""
+
+    def test_dummy_request(self):
+        """Test dummy request."""
+        req = Prepare.dummy_request("test_type")
+        assert req.request_type == "test_type"

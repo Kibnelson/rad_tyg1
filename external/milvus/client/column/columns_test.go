@@ -1,0 +1,271 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package column
+
+import (
+	"math/rand"
+	"strconv"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/client/v3/entity"
+)
+
+func TestIDColumns(t *testing.T) {
+	dataLen := rand.Intn(100) + 1
+	base := rand.Intn(5000) // id start point
+
+	intPKCol := entity.NewSchema().WithField(
+		entity.NewField().WithName("pk").WithIsPrimaryKey(true).WithDataType(entity.FieldTypeInt64),
+	)
+	strPKCol := entity.NewSchema().WithField(
+		entity.NewField().WithName("pk").WithIsPrimaryKey(true).WithDataType(entity.FieldTypeVarChar),
+	)
+
+	t.Run("nil id", func(t *testing.T) {
+		_, err := IDColumns(intPKCol, nil, 0, -1)
+		assert.NoError(t, err)
+		_, err = IDColumns(strPKCol, nil, 0, -1)
+		assert.NoError(t, err)
+
+		idField := &schemapb.IDs{}
+		col, err := IDColumns(intPKCol, idField, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
+		col, err = IDColumns(strPKCol, idField, 0, -1)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, col.Len())
+	})
+
+	t.Run("int ids", func(t *testing.T) {
+		ids := make([]int64, 0, dataLen)
+		for i := 0; i < dataLen; i++ {
+			ids = append(ids, int64(i+base))
+		}
+		idField := &schemapb.IDs{
+			IdField: &schemapb.IDs_IntId{
+				IntId: &schemapb.LongArray{
+					Data: ids,
+				},
+			},
+		}
+		column, err := IDColumns(intPKCol, idField, 0, dataLen)
+		assert.Nil(t, err)
+		assert.NotNil(t, column)
+		assert.Equal(t, dataLen, column.Len())
+
+		column, err = IDColumns(intPKCol, idField, 0, -1) // test -1 method
+		assert.Nil(t, err)
+		assert.NotNil(t, column)
+		assert.Equal(t, dataLen, column.Len())
+	})
+	t.Run("string ids", func(t *testing.T) {
+		ids := make([]string, 0, dataLen)
+		for i := 0; i < dataLen; i++ {
+			ids = append(ids, strconv.FormatInt(int64(i+base), 10))
+		}
+		idField := &schemapb.IDs{
+			IdField: &schemapb.IDs_StrId{
+				StrId: &schemapb.StringArray{
+					Data: ids,
+				},
+			},
+		}
+		column, err := IDColumns(strPKCol, idField, 0, dataLen)
+		assert.Nil(t, err)
+		assert.NotNil(t, column)
+		assert.Equal(t, dataLen, column.Len())
+
+		column, err = IDColumns(strPKCol, idField, 0, -1) // test -1 method
+		assert.Nil(t, err)
+		assert.NotNil(t, column)
+		assert.Equal(t, dataLen, column.Len())
+	})
+}
+
+func TestFieldDataColumnValidDataSources(t *testing.T) {
+	validData := []bool{true, false}
+	makeField := func(legacy, current []bool) *schemapb.FieldData {
+		return &schemapb.FieldData{
+			Type:      schemapb.DataType_Int64,
+			FieldName: "value",
+			ValidData: legacy,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					ValidData: current,
+					Data: &schemapb.ScalarField_LongData{
+						LongData: &schemapb.LongArray{Data: []int64{1, 0}},
+					},
+				},
+			},
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		legacy  []bool
+		current []bool
+	}{
+		{name: "legacy only", legacy: validData},
+		{name: "field-specific only", current: validData},
+		{name: "matching dual sources", legacy: validData, current: validData},
+		// An older server may rewrite the legacy location and forward a stale
+		// field-specific copy; the legacy value wins.
+		{name: "mismatched dual sources", legacy: validData, current: []bool{false, true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			col, err := FieldDataColumn(makeField(test.legacy, test.current), 0, -1)
+			require.NoError(t, err)
+			require.Equal(t, 2, col.Len())
+			for i, valid := range validData {
+				isNull, err := col.IsNull(i)
+				require.NoError(t, err)
+				assert.Equal(t, !valid, isNull, "row %d", i)
+			}
+		})
+	}
+}
+
+func TestSetFieldDataValidDataWritesBothLocations(t *testing.T) {
+	validData := []bool{true, false}
+
+	scalar := &schemapb.FieldData{Field: &schemapb.FieldData_Scalars{Scalars: &schemapb.ScalarField{}}}
+	setFieldDataValidData(scalar, validData)
+	assert.Equal(t, validData, scalar.GetValidData())
+	assert.Equal(t, validData, scalar.GetScalars().GetValidData())
+
+	vector := &schemapb.FieldData{Field: &schemapb.FieldData_Vectors{Vectors: &schemapb.VectorField{}}}
+	setFieldDataValidData(vector, validData)
+	assert.Equal(t, validData, vector.GetValidData())
+	assert.Equal(t, validData, vector.GetVectors().GetValidData())
+
+	structArray := &schemapb.FieldData{Field: &schemapb.FieldData_StructArrays{StructArrays: &schemapb.StructArrayField{}}}
+	setFieldDataValidData(structArray, validData)
+	assert.Nil(t, structArray.GetValidData())
+}
+
+func TestGetIntData(t *testing.T) {
+	type testCase struct {
+		tag      string
+		fd       *schemapb.FieldData
+		expectOK bool
+	}
+
+	cases := []testCase{
+		{
+			tag: "normal_IntData",
+			fd: &schemapb.FieldData{
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_IntData{
+							IntData: &schemapb.IntArray{Data: []int32{1, 2, 3}},
+						},
+					},
+				},
+			},
+			expectOK: true,
+		},
+		{
+			tag: "empty_LongData",
+			fd: &schemapb.FieldData{
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_LongData{
+							LongData: &schemapb.LongArray{Data: nil},
+						},
+					},
+				},
+			},
+			expectOK: true,
+		},
+		{
+			tag: "nonempty_LongData",
+			fd: &schemapb.FieldData{
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_LongData{
+							LongData: &schemapb.LongArray{Data: []int64{1, 2, 3}},
+						},
+					},
+				},
+			},
+			expectOK: false,
+		},
+		{
+			tag: "other_data",
+			fd: &schemapb.FieldData{
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_BoolData{},
+					},
+				},
+			},
+			expectOK: false,
+		},
+		{
+			tag: "vector_data",
+			fd: &schemapb.FieldData{
+				Field: &schemapb.FieldData_Vectors{},
+			},
+			expectOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			_, ok := getIntData(tc.fd)
+			assert.Equal(t, tc.expectOK, ok)
+		})
+	}
+}
+
+func TestFieldDataColumnRejectsInvalidRange(t *testing.T) {
+	fd := &schemapb.FieldData{
+		Type:      schemapb.DataType_Int64,
+		FieldName: "age",
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_LongData{
+					LongData: &schemapb.LongArray{Data: []int64{10, 20, 30}},
+				},
+			},
+		},
+	}
+
+	column, err := FieldDataColumn(fd, 1, -1)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, column.Len())
+
+	for _, tc := range []struct {
+		name       string
+		begin, end int
+	}{
+		{name: "negative begin", begin: -1, end: 1},
+		{name: "begin past rows", begin: 4, end: 4},
+		{name: "unsupported negative end", begin: 0, end: -2},
+		{name: "end past rows", begin: 0, end: 4},
+		{name: "begin after end", begin: 2, end: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := FieldDataColumn(fd, tc.begin, tc.end)
+			assert.Error(t, err)
+		})
+	}
+}

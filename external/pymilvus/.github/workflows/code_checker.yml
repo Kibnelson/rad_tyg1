@@ -1,0 +1,37 @@
+name: Code checker on pull request
+
+on:
+  pull_request:
+    branches:
+      - 3.0
+
+jobs:
+  code-lint:
+    name: Code lint check
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: [3.9, 3.14]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Set up python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.9.21"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Check pyproject.toml install
+        run: |
+          uv sync --frozen --python python
+      - name: Install requirements
+        run: |
+          uv sync --group dev --frozen --python python
+      - name: Run pylint
+        shell: bash
+        run: |
+          make lint

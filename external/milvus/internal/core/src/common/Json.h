@@ -1,0 +1,508 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <algorithm>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/replace.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "common/EasyAssert.h"
+#include "simdjson.h"
+#include "fmt/core.h"
+#include "simdjson/common_defs.h"
+#include "simdjson/dom/array.h"
+#include "simdjson/dom/document.h"
+#include "simdjson/dom/element.h"
+#include "simdjson/error.h"
+#include "simdjson/padded_string.h"
+
+#define SIMDJSON_CHECK_ERROR(result)               \
+    do {                                           \
+        if ((result).error() != simdjson::SUCCESS) \
+            return (result).error();               \
+    } while (0)
+namespace milvus {
+
+// Classify a simdjson error at a *parse / required-structure* boundary into a
+// segcore ErrorCode, so a malformed JSON does not collapse to the generic
+// UnexpectedError(2001). segcore parses JSON read back from storage, so an
+// unrecognized parse failure means the stored bytes are malformed
+// (DataFormatBroken); MEMALLOC / IO are transient; a few codes mean milvus
+// itself mis-sized / mis-used the parser (a bug) and stay UnexpectedError.
+//
+// NOTE: this is for parse / required-structure boundaries only. simdjson's
+// NO_SUCH_FIELD / INCORRECT_TYPE / OUT_OF_BOUNDS are the normal negative result
+// of optional-field / dynamic-type access and MUST NOT be routed here -- those
+// call sites (exist(), path_exists(), at<T>()) keep swallowing them into a
+// bool / nullopt.
+inline ErrorCode
+SimdjsonParseErrorToErrorCode(simdjson::error_code err) {
+    switch (err) {
+        case simdjson::MEMALLOC:
+            return ErrorCode::MemAllocateFailed;  // 2034, retriable OOM
+        case simdjson::IO_ERROR:
+            return ErrorCode::FileReadFailed;  // 2014, retriable
+        case simdjson::CAPACITY:
+        case simdjson::UNINITIALIZED:
+        case simdjson::INSUFFICIENT_PADDING:
+        case simdjson::UNEXPECTED_ERROR:
+        case simdjson::PARSER_IN_USE:
+        case simdjson::OUT_OF_ORDER_ITERATION:
+            return ErrorCode::UnexpectedError;  // milvus-side misuse / bug
+        default:
+            return ErrorCode::DataFormatBroken;  // 2024, malformed stored JSON
+    }
+}
+
+bool
+isObjectEmpty(simdjson::ondemand::value value);
+bool
+isDocEmpty(simdjson::ondemand::document document);
+
+// Extract specific top-level keys from a JSON string using simdjson ondemand.
+// Uses raw_json() to copy value fragments directly from the source without
+// re-parsing or re-serializing, which is faster than rapidjson or nlohmann.
+// Note: output key order follows source JSON field order (not keys param order).
+// This is safe because JSON objects are unordered per RFC 8259, and downstream
+// consumers (Go protobuf → map) do not depend on key ordering.
+inline std::string
+ExtractSubJson(std::string_view json, const std::vector<std::string>& keys) {
+    simdjson::padded_string padded(json.data(), json.size());
+    thread_local simdjson::ondemand::parser parser;
+    auto doc = parser.iterate(padded);
+    if (doc.error()) {
+        ThrowInfo(SimdjsonParseErrorToErrorCode(doc.error()),
+                  "json parse failed: {}",
+                  simdjson::error_message(doc.error()));
+    }
+
+    auto obj = doc.get_object();
+    if (obj.error()) {
+        ThrowInfo(SimdjsonParseErrorToErrorCode(obj.error()),
+                  "ExtractSubJson: input is not a JSON object: {}",
+                  simdjson::error_message(obj.error()));
+    }
+
+    std::string result = "{";
+    result.reserve(json.size());
+    bool first = true;
+    for (auto field : obj) {
+        // escaped_key() returns the key as-is from source (safe for JSON output)
+        std::string_view ek = field.escaped_key();
+        // unescaped_key() resolves escape sequences for correct comparison
+        auto uk = field.unescaped_key();
+        if (uk.error()) {
+            ThrowInfo(SimdjsonParseErrorToErrorCode(uk.error()),
+                      "ExtractSubJson: failed to decode key: {}",
+                      simdjson::error_message(uk.error()));
+        }
+        if (std::find(keys.begin(), keys.end(), uk.value()) != keys.end()) {
+            // raw_json() extracts the original JSON text of the value,
+            // avoiding any re-serialization overhead
+            auto raw = field.value().raw_json();
+            if (raw.error()) {
+                ThrowInfo(SimdjsonParseErrorToErrorCode(raw.error()),
+                          "ExtractSubJson: failed to extract value for "
+                          "key '{}': {}",
+                          uk.value(),
+                          simdjson::error_message(raw.error()));
+            }
+            if (!first) {
+                result += ',';
+            }
+            result += '"';
+            result += ek;
+            result += "\":";
+            result += raw.value();
+            first = false;
+        }
+    }
+    result += '}';
+    return result;
+}
+
+using document = simdjson::ondemand::document;
+template <typename T>
+using value_result = simdjson::simdjson_result<T>;
+
+struct JsonStringOrInt64 {
+    enum class Kind : uint8_t {
+        NoProbeValue,
+        String,
+        Int64,
+        OtherNumber,
+    };
+
+    Kind kind{Kind::NoProbeValue};
+    std::string_view string_value{};
+    int64_t int64_value{};
+};
+
+class Json {
+ public:
+    Json() = default;
+
+    explicit Json(simdjson::padded_string data) : own_data_(std::move(data)) {
+        data_ = own_data_.value();
+    }
+
+    Json(const char* data, size_t len, size_t cap) : data_(data, len) {
+        AssertInfo(
+            len + simdjson::SIMDJSON_PADDING <= cap,
+            "create json without enough memory size for SIMD, len={}, cap={}",
+            len,
+            cap);
+    }
+
+    // WARN: this is used for fast non-copy construction,
+    // MUST make sure there at least SIMDJSON_PADDING bytes allocated
+    // after the string_view
+    explicit Json(const std::string_view& data)
+        : Json(data.data(), data.size()) {
+    }
+
+    // WARN: this is used for fast non-copy construction,
+    // MUST make sure that the data points to a memory that
+    // with size at least len + SIMDJSON_PADDING
+    Json(const char* data, size_t len)
+        : data_(data, len, len + simdjson::SIMDJSON_PADDING) {
+    }
+
+    Json(const Json& json) {
+        if (json.own_data_.has_value()) {
+            own_data_ = simdjson::padded_string(
+                json.own_data_.value().data(), json.own_data_.value().length());
+            data_ = own_data_.value();
+        } else {
+            data_ = json.data_;
+        }
+    };
+    Json(Json&& json) noexcept {
+        if (json.own_data_.has_value()) {
+            own_data_ = std::move(json.own_data_);
+            data_ = own_data_.value();
+        } else {
+            data_ = json.data_;
+        }
+    }
+
+    Json&
+    operator=(const Json& json) {
+        if (json.own_data_.has_value()) {
+            own_data_ = simdjson::padded_string(
+                json.own_data_.value().data(), json.own_data_.value().length());
+            data_ = own_data_.value();
+        } else {
+            data_ = json.data_;
+        }
+        return *this;
+    }
+
+    Json&
+    operator=(Json&& json) noexcept {
+        if (this != &json) {
+            if (json.own_data_.has_value()) {
+                own_data_ = std::move(json.own_data_);
+                data_ = own_data_.value();
+            } else {
+                // A borrowed view may alias our current owned buffer. Keep
+                // that buffer alive, just as copy assignment does.
+                data_ = json.data_;
+            }
+        }
+        return *this;
+    }
+
+    operator std::string_view() const {
+        return data_;
+    }
+
+    value_result<document>
+    doc() const {
+        if (data_.size() == 0) {
+            return {};
+        }
+        thread_local simdjson::ondemand::parser parser;
+
+        // it's always safe to add the padding,
+        // as we have allocated the memory with this padding
+        auto doc =
+            parser.iterate(data_, data_.size() + simdjson::SIMDJSON_PADDING);
+        if (doc.error() != simdjson::SUCCESS) {
+            ThrowInfo(SimdjsonParseErrorToErrorCode(doc.error()),
+                      "failed to parse the json {}: {}",
+                      data_,
+                      simdjson::error_message(doc.error()));
+        }
+        return doc;
+    }
+
+    value_result<simdjson::dom::element>
+    dom_doc() const {
+        if (data_.size() == 0) {
+            return {};
+        }
+        thread_local simdjson::dom::parser parser;
+
+        // it's always safe to add the padding,
+        // as we have allocated the memory with this padding
+        auto doc = parser.parse(data_);
+        if (doc.error() != simdjson::SUCCESS) {
+            ThrowInfo(SimdjsonParseErrorToErrorCode(doc.error()),
+                      "failed to parse the json {}: {}",
+                      data_,
+                      simdjson::error_message(doc.error()));
+        }
+        return doc;
+    }
+
+    bool
+    exist(std::string_view pointer) const {
+        auto doc = this->doc();
+        if (pointer.empty()) {
+            return doc.error() == simdjson::SUCCESS &&
+                   !isDocEmpty(std::move(doc));
+        } else {
+            auto res = doc.at_pointer(pointer);
+            return res.error() == simdjson::SUCCESS &&
+                   !isObjectEmpty(res.value());
+        }
+    }
+
+    // construct JSON pointer with provided path
+    static std::string
+    pointer(std::vector<std::string> nested_path) {
+        if (nested_path.empty()) {
+            return "";
+        }
+        std::for_each(
+            nested_path.begin(), nested_path.end(), [](std::string& key) {
+                boost::replace_all(key, "~", "~0");
+                boost::replace_all(key, "/", "~1");
+            });
+        auto pointer = "/" + boost::algorithm::join(nested_path, "/");
+        return pointer;
+    }
+
+    auto
+    type(const std::string& pointer) const {
+        return pointer.empty() ? doc().type()
+                               : doc().at_pointer(pointer).type();
+    }
+
+    auto
+    get_number_type(const std::string& pointer) const {
+        return pointer.empty() ? doc().get_number_type()
+                               : doc().at_pointer(pointer).get_number_type();
+    }
+
+    template <typename T>
+    value_result<T>
+    at(std::string_view pointer) const {
+        if (pointer == "") {
+            if constexpr (std::is_same_v<std::string_view, T> ||
+                          std::is_same_v<std::string, T>) {
+                return doc().get_string(false);
+            } else if constexpr (std::is_same_v<bool, T>) {
+                return doc().get_bool();
+            } else if constexpr (std::is_same_v<int64_t, T>) {
+                return doc().get_int64();
+            } else if constexpr (std::is_same_v<double, T>) {
+                return doc().get_double();
+            }
+        }
+
+        return doc().at_pointer(pointer).get<T>();
+    }
+
+    // Extract a JSON number in a single parse, preserving the original type.
+    // Returns simdjson::ondemand::number (a tagged union of int64/uint64/double).
+    // Callers should branch on is_int64()/is_uint64()/is_double() to avoid
+    // precision loss when comparing large integers.
+    value_result<simdjson::ondemand::number>
+    at_numeric(std::string_view pointer) const {
+        if (pointer.empty()) {
+            return doc().get_number();
+        }
+        return doc().at_pointer(pointer).get_number();
+    }
+
+    // Parse the document and resolve the JSON pointer exactly once, then
+    // classify the value for callers that accept only strings or int64s.
+    // string_value must be consumed before the next ondemand parse on this
+    // thread because simdjson may store decoded strings in its parser buffer.
+    JsonStringOrInt64
+    at_string_or_int64(std::string_view pointer) const {
+        const auto extract = [](auto&& value) {
+            auto type = value.type();
+            if (type.error()) {
+                return JsonStringOrInt64{};
+            }
+
+            switch (type.value()) {
+                case simdjson::ondemand::json_type::string: {
+                    auto str = value.get_string(false);
+                    if (str.error()) {
+                        return JsonStringOrInt64{};
+                    }
+                    return JsonStringOrInt64{
+                        JsonStringOrInt64::Kind::String, str.value(), 0};
+                }
+                case simdjson::ondemand::json_type::number: {
+                    auto number = value.get_number();
+                    if (number.error()) {
+                        return JsonStringOrInt64{};
+                    }
+                    auto n = number.value();
+                    if (n.is_int64()) {
+                        return JsonStringOrInt64{
+                            JsonStringOrInt64::Kind::Int64, {}, n.get_int64()};
+                    }
+                    return JsonStringOrInt64{
+                        JsonStringOrInt64::Kind::OtherNumber, {}, 0};
+                }
+                default:
+                    return JsonStringOrInt64{};
+            }
+        };
+
+        auto document = doc();
+        if (document.error()) {
+            return {};
+        }
+        if (pointer.empty()) {
+            return extract(document.value());
+        }
+
+        auto value = document.value().at_pointer(pointer);
+        if (value.error()) {
+            return {};
+        }
+        return extract(value.value());
+    }
+
+    value_result<std::string>
+    at_string_any(std::string_view pointer) const {
+        if (data_.empty()) {
+            return std::string{};
+        }
+
+        auto doc_res = doc();
+        SIMDJSON_CHECK_ERROR(doc_res);
+
+        auto el_res = doc_res.value().at_pointer(pointer);
+        SIMDJSON_CHECK_ERROR(el_res);
+
+        auto json_str = simdjson::to_json_string(el_res.value());
+        SIMDJSON_CHECK_ERROR(json_str);
+
+        return std::string{json_str.value()};
+    }
+
+    // get dom array by JSON pointer,
+    // call `size()` to get array size,
+    // call `at()` to get array element by index,
+    // iterate through array elements by iterator.
+    value_result<simdjson::dom::array>
+    array_at(std::string_view pointer) const {
+        return dom_doc().at_pointer(pointer).get_array();
+    }
+
+    size_t
+    size() const {
+        return data_.size();
+    }
+
+    std::string_view
+    data() const {
+        return data_;
+    }
+
+    const char*
+    c_str() const {
+        return data_.data();
+    }
+
+ private:
+    std::optional<simdjson::padded_string>
+        own_data_{};  // this could be empty, then the Json will be just s view on bytes
+    simdjson::padded_string_view data_{};
+};
+
+inline bool
+isObjectEmpty(simdjson::ondemand::value value) {
+    if (value.is_null()) {
+        return true;
+    }
+
+    if (value.type().value() == simdjson::ondemand::json_type::object) {
+        auto object = value.get_object();
+        for (auto field : object) {
+            if (!isObjectEmpty(field.value())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (value.type().value() == simdjson::ondemand::json_type::array) {
+        auto array = value.get_array();
+        for (auto element : array) {
+            if (!isObjectEmpty(std::move(element))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+inline bool
+isDocEmpty(simdjson::ondemand::document document) {
+    if (document.is_null()) {
+        return true;
+    }
+
+    if (document.type().value() == simdjson::ondemand::json_type::object) {
+        auto object = document.get_object();
+        for (auto field : object) {
+            if (!isObjectEmpty(field.value())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (document.type().value() == simdjson::ondemand::json_type::array) {
+        auto array = document.get_array();
+        for (auto element : array) {
+            if (!isObjectEmpty(std::move(element))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+}  // namespace milvus

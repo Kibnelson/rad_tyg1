@@ -1,0 +1,622 @@
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License
+
+#pragma once
+
+#include <fcntl.h>
+#include "common/FastMem.h"
+#include <fmt/core.h>
+#include <google/protobuf/text_format.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <cstring>
+#include <cmath>
+#include <concepts>
+#include <filesystem>
+#include <limits>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <vector>
+
+#include "common/Consts.h"
+#include "common/FieldMeta.h"
+#include "common/LoadInfo.h"
+#include "common/Schema.h"
+#include "common/Types.h"
+#include "common/EasyAssert.h"
+#include "knowhere/dataset.h"
+#include "knowhere/expected.h"
+#include "knowhere/sparse_utils.h"
+#include "simdjson.h"
+
+namespace milvus {
+#define FIELD_DATA(data_array, type) \
+    (data_array->scalars().type##_data().data())
+
+#define VEC_FIELD_DATA(data_array, type) \
+    (data_array->vectors().type##_vector().data())
+
+// Row validity has two wire locations: the legacy FieldData.valid_data and the
+// field-specific ScalarField/VectorField.valid_data. Components built before
+// the field-specific location existed read and update only the legacy one and
+// forward the field-specific one untouched, so the legacy location is
+// authoritative whenever it is set. The Go side follows the same rules in
+// pkg/util/typeutil/field_data.go.
+inline const google::protobuf::RepeatedField<bool>&
+GetFieldDataRowValidData(const DataArray& field_data) {
+    if (field_data.valid_data_size() > 0) {
+        return field_data.valid_data();
+    }
+    if (field_data.has_scalars()) {
+        return field_data.scalars().valid_data();
+    }
+    if (field_data.has_vectors()) {
+        return field_data.vectors().valid_data();
+    }
+    return field_data.valid_data();
+}
+
+// Returns the field-specific row validity for the caller to fill, clearing the
+// legacy location. SyncFieldDataRowValidData must run before the DataArray
+// leaves segcore so that the legacy location carries the same mask.
+inline google::protobuf::RepeatedField<bool>*
+MutableFieldDataRowValidData(DataArray* field_data) {
+    field_data->clear_valid_data();
+    if (field_data->has_scalars()) {
+        return field_data->mutable_scalars()->mutable_valid_data();
+    }
+    if (field_data->has_vectors()) {
+        return field_data->mutable_vectors()->mutable_valid_data();
+    }
+    auto data_type = static_cast<DataType>(field_data->type());
+    AssertInfo(data_type != DataType::NONE,
+               "cannot set valid_data without FieldData type");
+    if (IsVectorDataType(data_type)) {
+        return field_data->mutable_vectors()->mutable_valid_data();
+    }
+    return field_data->mutable_scalars()->mutable_valid_data();
+}
+
+// Writes the authoritative row validity (see GetFieldDataRowValidData) to both
+// the legacy and the field-specific location. Call it on every DataArray that
+// segcore hands to Go.
+inline void
+SyncFieldDataRowValidData(DataArray* field_data) {
+    if (field_data->has_struct_arrays()) {
+        for (auto& sub_field :
+             *field_data->mutable_struct_arrays()->mutable_fields()) {
+            SyncFieldDataRowValidData(&sub_field);
+        }
+        return;
+    }
+    google::protobuf::RepeatedField<bool>* field_specific = nullptr;
+    if (field_data->has_scalars()) {
+        field_specific = field_data->mutable_scalars()->mutable_valid_data();
+    } else if (field_data->has_vectors()) {
+        field_specific = field_data->mutable_vectors()->mutable_valid_data();
+    } else {
+        return;
+    }
+    if (field_data->valid_data_size() > 0) {
+        *field_specific = field_data->valid_data();
+    } else {
+        *field_data->mutable_valid_data() = *field_specific;
+    }
+}
+
+using CheckDataValid = std::function<bool(size_t)>;
+using SparseValueType = typename knowhere::sparse_u32_f32::ValueType;
+
+inline DatasetPtr
+GenDataset(const int64_t nb, const int64_t dim, const void* xb) {
+    return knowhere::GenDataSet(nb, dim, xb);
+}
+
+inline const float*
+GetDatasetDistance(const DatasetPtr& dataset) {
+    return dataset->GetDistance();
+}
+
+inline const int64_t*
+GetDatasetIDs(const DatasetPtr& dataset) {
+    return dataset->GetIds();
+}
+
+inline int64_t
+GetDatasetRows(const DatasetPtr& dataset) {
+    return dataset->GetRows();
+}
+
+inline const void*
+GetDatasetTensor(const DatasetPtr& dataset) {
+    return dataset->GetTensor();
+}
+
+inline int64_t
+GetDatasetDim(const DatasetPtr& dataset) {
+    return dataset->GetDim();
+}
+
+inline const size_t*
+GetDatasetLims(const DatasetPtr& dataset) {
+    return dataset->GetLims();
+}
+
+inline bool
+PrefixMatch(const std::string_view str, const std::string_view prefix) {
+    if (prefix.length() > str.length()) {
+        return false;
+    }
+    return memcmp(str.data(), prefix.data(), prefix.length()) == 0;
+}
+
+inline DatasetPtr
+GenIdsDataset(const int64_t count, const int64_t* ids) {
+    auto ret_ds = std::make_shared<Dataset>();
+    ret_ds->SetRows(count);
+    ret_ds->SetDim(1);
+    ret_ds->SetIds(ids);
+    ret_ds->SetIsOwner(false);
+    return ret_ds;
+}
+
+inline DatasetPtr
+GenResultDataset(const int64_t nq,
+                 const int64_t topk,
+                 std::unique_ptr<int64_t[]> ids,
+                 std::unique_ptr<float[]> distance) {
+    auto ret_ds = std::make_shared<Dataset>();
+    // Dataset setters can allocate. Keep the arrays owned by the guards until
+    // every setter succeeds, including when only one pointer was installed.
+    ret_ds->SetIsOwner(false);
+    ret_ds->SetRows(nq);
+    ret_ds->SetDim(topk);
+    ret_ds->SetIds(ids.get());
+    ret_ds->SetDistance(distance.get());
+    ret_ds->SetIsOwner(true);
+    ids.release();
+    distance.release();
+    return ret_ds;
+}
+
+inline bool
+PostfixMatch(const std::string_view str, const std::string_view postfix) {
+    if (postfix.length() > str.length()) {
+        return false;
+    }
+
+    size_t offset = str.length() - postfix.length();
+    return memcmp(str.data() + offset, postfix.data(), postfix.length()) == 0;
+}
+
+inline bool
+InnerMatch(const std::string_view str, const std::string_view pattern) {
+    if (pattern.length() > str.length()) {
+        return false;
+    }
+    return str.find(pattern) != std::string::npos;
+}
+
+// Escape LIKE metacharacters (%, _, \) in a string so it can be safely
+// embedded in a LIKE pattern. Uses '\' as the escape character.
+inline std::string
+EscapeLikePattern(const std::string& literal) {
+    std::string escaped;
+    escaped.reserve(literal.size());
+    for (char c : literal) {
+        if (c == '%' || c == '_' || c == '\\') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(c);
+    }
+    return escaped;
+}
+
+inline int64_t
+upper_div(int64_t value, int64_t align) {
+    Assert(align > 0);
+    auto groups = value / align + (value % align != 0);
+    return groups;
+}
+
+inline bool
+IsMetricType(const std::string_view str,
+             const knowhere::MetricType& metric_type) {
+    return !strcasecmp(str.data(), metric_type.c_str());
+}
+
+inline bool
+PositivelyRelated(const knowhere::MetricType& metric_type) {
+    return IsMetricType(metric_type, knowhere::metric::IP) ||
+           IsMetricType(metric_type, knowhere::metric::COSINE) ||
+           IsMetricType(metric_type, knowhere::metric::BM25) ||
+           IsMetricType(metric_type, knowhere::metric::MHJACCARD) ||
+           IsMetricType(metric_type, knowhere::metric::MAX_SIM) ||
+           IsMetricType(metric_type, knowhere::metric::MAX_SIM_IP) ||
+           IsMetricType(metric_type, knowhere::metric::MAX_SIM_COSINE);
+}
+
+inline std::string
+KnowhereStatusString(knowhere::Status status) {
+    return knowhere::Status2String(status);
+}
+
+template <typename T>
+inline bool
+is_in_list(const T& t, std::function<std::vector<T>()> list_func) {
+    auto l = list_func();
+    return std::find(l.begin(), l.end(), t) != l.end();
+}
+
+template <typename T>
+std::string
+Join(const std::vector<T>& items, const std::string& delimiter) {
+    std::stringstream ss;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) {
+            ss << delimiter;
+        }
+        ss << items[i];
+    }
+    return ss.str();
+}
+
+inline bool
+IsInteger(const std::string& str) {
+    if (str.empty())
+        return false;
+
+    size_t start = 0;
+    if (str[0] == '+' || str[0] == '-') {
+        start = 1;
+        if (str.size() == 1)
+            return false;
+    }
+    for (size_t i = start; i < str.size(); ++i) {
+        if (str[i] < '0' || str[i] > '9')
+            return false;
+    }
+    return true;
+}
+
+inline std::string
+GetCommonPrefix(const std::string& str1, const std::string& str2) {
+    size_t len = std::min(str1.length(), str2.length());
+    size_t i = 0;
+    while (i < len && str1[i] == str2[i]) ++i;
+    return str1.substr(0, i);
+}
+
+// Escape braces in the input string,
+// used for fmt::format json string
+inline std::string
+EscapeBraces(const std::string& input) {
+    std::string result;
+    for (char ch : input) {
+        if (ch == '{')
+            result += "{{";
+        else if (ch == '}')
+            result += "}}";
+        else
+            result += ch;
+    }
+    return result;
+}
+
+// Adds unsigned integers and clamps overflow to the result type's maximum
+// value. Operands may differ in type; the result uses their common type.
+template <std::unsigned_integral L, std::unsigned_integral R>
+[[nodiscard]] constexpr std::common_type_t<L, R>
+SaturatingAdd(L lhs, R rhs) noexcept {
+    using T = std::common_type_t<L, R>;
+    constexpr auto max = std::numeric_limits<T>::max();
+    return rhs > max - lhs ? max : lhs + rhs;
+}
+
+// Multiplies unsigned integers and clamps overflow to the result type's
+// maximum value. Operands may differ in type; the result uses their common
+// type.
+template <std::unsigned_integral L, std::unsigned_integral R>
+[[nodiscard]] constexpr std::common_type_t<L, R>
+SaturatingMultiply(L lhs, R rhs) noexcept {
+    using T = std::common_type_t<L, R>;
+    constexpr auto max = std::numeric_limits<T>::max();
+    return lhs != 0 && rhs > max / lhs ? max : lhs * rhs;
+}
+
+// Return nullptr for valid data, otherwise a static reason. Callers decide the
+// error code and context. Validation neither allocates nor copies the row.
+// When is_sorted is supplied, report ordering instead of rejecting it. The
+// caller must sort and reject duplicate indices before consuming such a row.
+[[nodiscard]] inline const char*
+ValidateSparseRow(const void* data, size_t size, bool* is_sorted = nullptr) {
+    if (is_sorted) {
+        *is_sorted = true;
+    }
+    const auto element_size =
+        knowhere::sparse::SparseRow<SparseValueType>::element_size();
+    if (size % element_size != 0) {
+        return "Invalid size for sparse row data";
+    }
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    uint32_t previous = 0;
+    for (size_t offset = 0; offset < size; offset += element_size) {
+        uint32_t index;
+        SparseValueType value;
+        // Arrow values need not be aligned for integer or float reads.
+        std::memcpy(&index, bytes + offset, sizeof(index));
+        std::memcpy(&value, bytes + offset + sizeof(index), sizeof(value));
+        if (!std::isfinite(value)) {
+            return "Invalid sparse row: NaN or Inf value";
+        }
+        if (value < 0) {
+            return "Invalid sparse row: negative value";
+        }
+        if (index == std::numeric_limits<uint32_t>::max()) {
+            return "Invalid sparse row: id should be smaller than uint32 max";
+        }
+        if (offset > 0 && index <= previous) {
+            if (!is_sorted) {
+                return "Invalid sparse row: id should be strict ascending";
+            }
+            *is_sorted = false;
+        }
+        previous = index;
+    }
+    return nullptr;
+}
+
+inline knowhere::sparse::SparseRow<SparseValueType>
+CopyAndWrapSparseRow(const void* data,
+                     size_t size,
+                     const bool validate = false) {
+    // Length is a memory-safety requirement even when value validation is off.
+    // Check before allocating a whole number of cells and copying all bytes.
+    if (size % knowhere::sparse::SparseRow<SparseValueType>::element_size() !=
+        0) {
+        ThrowInfo(ErrorCode::DataFormatBroken,
+                  "Invalid size for sparse row data");
+    }
+    if (validate) {
+        if (const auto* error = ValidateSparseRow(data, size)) {
+            AssertInfo(false, "{}", error);
+        }
+    }
+    size_t num_elements =
+        size / knowhere::sparse::SparseRow<SparseValueType>::element_size();
+    knowhere::sparse::SparseRow<SparseValueType> row(num_elements);
+    milvus::fastmem::FastMemcpy(row.data(), data, size);
+    return row;
+}
+
+// Iterable is a list of bytes, each is a byte array representation of a single
+// sparse float row. This helper function converts such byte arrays into a list
+// of knowhere::sparse::SparseRow<SparseValueType>. The resulting list is a deep copy of
+// the source data.
+//
+// Here in segcore we validate the sparse row data only for search requests,
+// as the insert/upsert data are already validated in go code.
+template <typename Iterable>
+std::unique_ptr<knowhere::sparse::SparseRow<SparseValueType>[]>
+SparseBytesToRows(const Iterable& rows, const bool validate = false) {
+    if (rows.size() == 0) {
+        return nullptr;
+    }
+    auto res = std::make_unique<knowhere::sparse::SparseRow<SparseValueType>[]>(
+        rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        res[i] = std::move(
+            CopyAndWrapSparseRow(rows[i].data(), rows[i].size(), validate));
+    }
+    return res;
+}
+
+// SparseRowsToProto converts a list of knowhere::sparse::SparseRow<SparseValueType> to
+// a milvus::proto::schema::SparseFloatArray. The resulting proto is a deep copy
+// of the source data. source(i) returns the i-th row to be copied.
+inline void
+SparseRowsToProto(
+    const std::function<
+        const knowhere::sparse::SparseRow<SparseValueType>*(size_t)>& source,
+    int64_t rows,
+    milvus::proto::schema::SparseFloatArray* proto) {
+    int64_t max_dim = 0;
+    for (size_t i = 0; i < rows; ++i) {
+        const auto* row = source(i);
+        if (row == nullptr) {
+            // empty row
+            proto->add_contents();
+            continue;
+        }
+        max_dim = std::max(max_dim, row->dim());
+        proto->add_contents(row->data(), row->data_byte_size());
+    }
+    proto->set_dim(max_dim);
+}
+
+class Defer {
+ public:
+    Defer(std::function<void()> fn) : fn_(fn) {
+    }
+    ~Defer() {
+        fn_();
+    }
+
+ private:
+    std::function<void()> fn_;
+};
+
+#define DeferLambda(fn) Defer Defer_##__COUNTER__(fn);
+
+template <typename T>
+FOLLY_ALWAYS_INLINE int
+comparePrimitiveAsc(const T& left, const T& right) {
+    if constexpr (std::is_floating_point<T>::value) {
+        bool leftNan = std::isnan(left);
+        bool rightNan = std::isnan(right);
+        if (leftNan) {
+            return rightNan ? 0 : 1;
+        }
+        if (rightNan) {
+            return -1;
+        }
+    }
+    return left < right ? -1 : left == right ? 0 : 1;
+}
+
+inline std::string
+lowerString(const std::string& str) {
+    std::string ret;
+    ret.resize(str.size());
+    std::transform(str.begin(), str.end(), ret.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+    return ret;
+}
+
+template <typename T>
+T
+checkPlus(const T& a, const T& b, const char* typeName = "integer") {
+    static_assert(std::is_integral_v<T>, "checkPlus requires integral type");
+#if defined(__GNUC__) || defined(__clang__)
+    // Use compiler builtin for GCC/Clang
+    T result;
+    bool overflow = __builtin_add_overflow(a, b, &result);
+    if (UNLIKELY(overflow)) {
+        // Valid input values can overflow an aggregate accumulator. This is an
+        // execution failure, not an invalid caller-provided data type.
+        ThrowInfo(UnexpectedError, "{} overflow: {} + {}", typeName, a, b);
+    }
+    return result;
+#else
+    // Portable fallback for MSVC and other compilers
+    constexpr T max_val = std::numeric_limits<T>::max();
+    constexpr T min_val = std::numeric_limits<T>::min();
+
+    bool overflow = false;
+    if (b > 0) {
+        // Positive addition: check if a > max - b
+        if (a > max_val - b) {
+            overflow = true;
+        }
+    } else if (b < 0) {
+        // Negative addition: check if a < min - b
+        if (a < min_val - b) {
+            overflow = true;
+        }
+    }
+    // If b == 0, no overflow possible
+
+    if (UNLIKELY(overflow)) {
+        // Valid input values can overflow an aggregate accumulator. This is an
+        // execution failure, not an invalid caller-provided data type.
+        ThrowInfo(UnexpectedError, "{} overflow: {} + {}", typeName, a, b);
+    }
+    return a + b;
+#endif
+}
+
+inline const char* const KSum = "sum";
+inline const char* const KMin = "min";
+inline const char* const KMax = "max";
+inline const char* const KCount = "count";
+inline const char* const KAvg = "avg";
+
+inline DataType
+GetAggResultType(std::string func_name, DataType input_type) {
+    if (func_name == KSum) {
+        switch (input_type) {
+            case DataType::INT8:
+            case DataType::INT16:
+            case DataType::INT32:
+            case DataType::INT64: {
+                return DataType::INT64;
+            }
+            case DataType::TIMESTAMPTZ: {
+                return DataType::TIMESTAMPTZ;
+            }
+            case DataType::FLOAT: {
+                return DataType::DOUBLE;
+            }
+            case DataType::DOUBLE: {
+                return DataType::DOUBLE;
+            }
+            default: {
+                ThrowInfo(DataTypeInvalid,
+                          "Unsupported data type for type:{}",
+                          input_type);
+            }
+        }
+    }
+    if (func_name == KAvg) {
+        switch (input_type) {
+            case DataType::INT8:
+            case DataType::INT16:
+            case DataType::INT32:
+            case DataType::INT64:
+            case DataType::FLOAT:
+            case DataType::DOUBLE: {
+                return DataType::DOUBLE;
+            }
+            default: {
+                ThrowInfo(DataTypeInvalid,
+                          "Unsupported data type for {} aggregation: {}",
+                          func_name,
+                          input_type);
+            }
+        }
+    }
+    if (func_name == KMin || func_name == KMax) {
+        // min/max keep the original scalar type.
+        switch (input_type) {
+            case DataType::INT8:
+            case DataType::INT16:
+            case DataType::INT32:
+            case DataType::INT64:
+            case DataType::FLOAT:
+            case DataType::DOUBLE:
+            case DataType::VARCHAR:
+            case DataType::STRING:
+            case DataType::TEXT:
+            case DataType::TIMESTAMPTZ: {
+                return input_type;
+            }
+            default: {
+                ThrowInfo(DataTypeInvalid,
+                          "Unsupported data type for {} aggregation: {}",
+                          func_name,
+                          input_type);
+            }
+        }
+    }
+    if (func_name == KCount) {
+        return DataType::INT64;
+    }
+    ThrowInfo(OpTypeInvalid, "Unsupported func type:{}", func_name);
+}
+
+inline int32_t
+Align(int32_t number, int32_t alignment) {
+    AssertInfo(alignment > 0 && (alignment & (alignment - 1)) == 0,
+               "Alignment must be a power of 2, got {}",
+               alignment);
+    return (number + alignment - 1) & ~(alignment - 1);
+}
+
+inline bool
+IsStructSubField(const std::string& fieldName) {
+    return fieldName.find('[') != std::string::npos;
+}
+
+}  // namespace milvus

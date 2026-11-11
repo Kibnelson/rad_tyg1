@@ -1,0 +1,285 @@
+package proxy
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
+	"github.com/milvus-io/milvus/pkg/v3/util"
+)
+
+func TestCompactionPlansDatabaseInterceptor(t *testing.T) {
+	for _, tc := range []struct{ name, header, body, want string }{
+		{"header", "dbA", "", "dbA"},
+		{"explicit_body", "dbA", "dbB", "dbB"},
+		{"default", "", "", "default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(util.HeaderDBName, tc.header))
+			for _, collection := range []string{"C", ""} {
+				req := &milvuspb.GetCompactionPlansRequest{DbName: tc.body, CollectionName: collection, CompactionID: 123}
+				_, err := DatabaseInterceptor()(ctx, req, &grpc.UnaryServerInfo{}, func(ctx context.Context, request interface{}) (interface{}, error) {
+					got := request.(*milvuspb.GetCompactionPlansRequest)
+					assert.Equal(t, tc.want, got.GetDbName())
+					assert.Equal(t, collection, got.GetCollectionName())
+					assert.Equal(t, int64(123), got.GetCompactionID())
+					return nil, nil
+				})
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestDatabaseInterceptor(t *testing.T) {
+	ctx := context.Background()
+	interceptor := DatabaseInterceptor()
+
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return "", nil
+	}
+
+	t.Run("empty md", func(t *testing.T) {
+		req := &milvuspb.CreateCollectionRequest{}
+		_, err := interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+		assert.NoError(t, err)
+		assert.Equal(t, util.DefaultDBName, req.GetDbName())
+	})
+
+	t.Run("with invalid metadata", func(t *testing.T) {
+		md := metadata.Pairs("xxx", "yyy")
+		ctx = metadata.NewIncomingContext(ctx, md)
+		req := &milvuspb.CreateCollectionRequest{}
+		_, err := interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+		assert.NoError(t, err)
+		assert.Equal(t, util.DefaultDBName, req.GetDbName())
+	})
+
+	t.Run("empty req", func(t *testing.T) {
+		md := metadata.Pairs("xxx", "yyy")
+		ctx = metadata.NewIncomingContext(ctx, md)
+		_, err := interceptor(ctx, "", &grpc.UnaryServerInfo{}, handler)
+		assert.NoError(t, err)
+	})
+
+	t.Run("id-only describe keeps omitted database empty", func(t *testing.T) {
+		md := metadata.Pairs(util.HeaderDBName, "db-from-header")
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+		req := &milvuspb.DescribeCollectionRequest{CollectionID: 100}
+		_, err := interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+		assert.NoError(t, err)
+		assert.Empty(t, req.GetDbName())
+	})
+
+	t.Run("name-based describe still gets database from metadata", func(t *testing.T) {
+		md := metadata.Pairs(util.HeaderDBName, "db-from-header")
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+		req := &milvuspb.DescribeCollectionRequest{CollectionName: "collection"}
+		_, err := interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+		assert.NoError(t, err)
+		assert.Equal(t, "db-from-header", req.GetDbName())
+	})
+
+	t.Run("restore snapshot defaults databases independently from active database", func(t *testing.T) {
+		testCases := []struct {
+			name           string
+			dbName         string
+			targetDBName   string
+			metadataDBName string
+			expectedDBName string
+			expectedTarget string
+		}{
+			{
+				name:           "explicit source database",
+				dbName:         "source_db",
+				expectedDBName: "source_db",
+				expectedTarget: util.DefaultDBName,
+			},
+			{
+				name:           "explicit source database with different active database",
+				dbName:         "archive",
+				metadataDBName: "tenant_a",
+				expectedDBName: "archive",
+				expectedTarget: "tenant_a",
+			},
+			{
+				name:           "source database from metadata",
+				metadataDBName: "tenant_a",
+				expectedDBName: "tenant_a",
+				expectedTarget: "tenant_a",
+			},
+			{
+				name:           "explicit target database is preserved",
+				dbName:         "source_db",
+				targetDBName:   "target_db",
+				expectedDBName: "source_db",
+				expectedTarget: "target_db",
+			},
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				ctx := context.Background()
+				if testCase.metadataDBName != "" {
+					ctx = metadata.NewIncomingContext(ctx, metadata.Pairs(util.HeaderDBName, testCase.metadataDBName))
+				}
+				req := &milvuspb.RestoreSnapshotRequest{
+					DbName:       testCase.dbName,
+					TargetDbName: testCase.targetDBName,
+				}
+
+				_, err := interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+				assert.NoError(t, err)
+				assert.Equal(t, testCase.expectedDBName, req.GetDbName())
+				assert.Equal(t, testCase.expectedTarget, req.GetTargetDbName())
+			})
+		}
+	})
+
+	t.Run("external snapshot requests get db from metadata", func(t *testing.T) {
+		md := metadata.Pairs(util.HeaderDBName, "db")
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+		testCases := []struct {
+			name  string
+			req   proto.Message
+			dbFun func(proto.Message) string
+		}{
+			{
+				name: "restore external snapshot",
+				req:  &milvuspb.RestoreExternalSnapshotRequest{},
+				dbFun: func(req proto.Message) string {
+					return req.(*milvuspb.RestoreExternalSnapshotRequest).GetDbName()
+				},
+			},
+			{
+				name: "export snapshot",
+				req:  &milvuspb.ExportSnapshotRequest{},
+				dbFun: func(req proto.Message) string {
+					return req.(*milvuspb.ExportSnapshotRequest).GetDbName()
+				},
+			},
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				_, err := interceptor(ctx, testCase.req, &grpc.UnaryServerInfo{}, handler)
+				assert.NoError(t, err)
+				assert.Equal(t, "db", testCase.dbFun(testCase.req))
+			})
+		}
+	})
+
+	t.Run("test ok for all request", func(t *testing.T) {
+		availableReqs := []proto.Message{
+			&milvuspb.CreateCollectionRequest{},
+			&milvuspb.DropCollectionRequest{},
+			&milvuspb.TruncateCollectionRequest{},
+			&milvuspb.HasCollectionRequest{},
+			&milvuspb.LoadCollectionRequest{},
+			&milvuspb.ReleaseCollectionRequest{},
+			&milvuspb.DescribeCollectionRequest{},
+			&milvuspb.BatchDescribeCollectionRequest{},
+			&milvuspb.GetStatisticsRequest{},
+			&milvuspb.GetCollectionStatisticsRequest{},
+			&milvuspb.ShowCollectionsRequest{},
+			&milvuspb.AlterCollectionRequest{},
+			&milvuspb.AlterCollectionFieldRequest{},
+			&milvuspb.AddCollectionFunctionRequest{},
+			&milvuspb.DropCollectionFunctionRequest{},
+			&milvuspb.AlterCollectionFunctionRequest{},
+			&milvuspb.CreatePartitionRequest{},
+			&milvuspb.DropPartitionRequest{},
+			&milvuspb.HasPartitionRequest{},
+			&milvuspb.LoadPartitionsRequest{},
+			&milvuspb.ReleasePartitionsRequest{},
+			&milvuspb.GetPartitionStatisticsRequest{},
+			&milvuspb.ShowPartitionsRequest{},
+			&milvuspb.GetLoadingProgressRequest{},
+			&milvuspb.GetLoadStateRequest{},
+			&milvuspb.CreateIndexRequest{},
+			&milvuspb.DescribeIndexRequest{},
+			&milvuspb.DropIndexRequest{},
+			&milvuspb.AlterIndexRequest{},
+			&milvuspb.GetIndexBuildProgressRequest{},
+			&milvuspb.GetIndexStateRequest{},
+			&milvuspb.InsertRequest{},
+			&milvuspb.DeleteRequest{},
+			&milvuspb.SearchRequest{},
+			&milvuspb.HybridSearchRequest{},
+			&milvuspb.FlushRequest{},
+			&milvuspb.GetFlushStateRequest{},
+			&milvuspb.QueryRequest{},
+			&milvuspb.CreateAliasRequest{},
+			&milvuspb.DropAliasRequest{},
+			&milvuspb.AlterAliasRequest{},
+			&milvuspb.ListAliasesRequest{},
+			&milvuspb.DescribeAliasRequest{},
+			&milvuspb.GetPersistentSegmentInfoRequest{},
+			&milvuspb.GetQuerySegmentInfoRequest{},
+			&milvuspb.LoadBalanceRequest{},
+			&milvuspb.GetReplicasRequest{},
+			&milvuspb.ImportRequest{},
+			&milvuspb.RenameCollectionRequest{},
+			&milvuspb.TransferReplicaRequest{},
+			&milvuspb.ListImportTasksRequest{},
+			&milvuspb.OperatePrivilegeRequest{Entity: &milvuspb.GrantEntity{}},
+			&milvuspb.SelectGrantRequest{Entity: &milvuspb.GrantEntity{}},
+			&milvuspb.ManualCompactionRequest{},
+			&milvuspb.GetCompactionPlansRequest{},
+			&milvuspb.AddCollectionFieldRequest{},
+			&milvuspb.AddCollectionStructFieldRequest{},
+			&milvuspb.AlterCollectionSchemaRequest{},
+			&milvuspb.RunAnalyzerRequest{},
+			&milvuspb.RestoreExternalSnapshotRequest{},
+			&milvuspb.ExportSnapshotRequest{},
+			&milvuspb.RefreshExternalCollectionRequest{},
+			&milvuspb.ListRefreshExternalCollectionJobsRequest{},
+		}
+
+		md := metadata.Pairs(util.HeaderDBName, "db")
+		ctx = metadata.NewIncomingContext(ctx, md)
+		for _, req := range availableReqs {
+			before, err := proto.Marshal(req)
+			assert.NoError(t, err)
+
+			_, err = interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+			assert.NoError(t, err)
+
+			after, err := proto.Marshal(req)
+			assert.NoError(t, err)
+
+			assert.True(t, len(after) > len(before))
+		}
+
+		unavailableReqs := []proto.Message{
+			&milvuspb.GetMetricsRequest{},
+			&milvuspb.DummyRequest{},
+			&milvuspb.CalcDistanceRequest{},
+			&milvuspb.FlushAllRequest{},
+			&milvuspb.GetCompactionStateRequest{},
+			&milvuspb.GetFlushAllStateRequest{},
+			&milvuspb.GetImportStateRequest{},
+		}
+
+		for _, req := range unavailableReqs {
+			before, err := proto.Marshal(req)
+			assert.NoError(t, err)
+
+			_, err = interceptor(ctx, req, &grpc.UnaryServerInfo{}, handler)
+			assert.NoError(t, err)
+
+			after, err := proto.Marshal(req)
+			assert.NoError(t, err)
+
+			if len(after) != len(before) {
+				t.Errorf("req has been modified:%s", prototext.Format(req))
+			}
+		}
+	})
+}

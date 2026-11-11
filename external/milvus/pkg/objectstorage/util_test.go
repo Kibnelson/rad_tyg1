@@ -1,0 +1,574 @@
+package objectstorage
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"cloud.google.com/go/storage"
+	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/api/googleapi"
+)
+
+func TestResolveCloudProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, address, want string
+	}{
+		{"explicit_gcp", CloudProviderGCP, "custom.example.com", CloudProviderGCP},
+		{"explicit_aliyun", CloudProviderAliyun, "storage.googleapis.com", CloudProviderAliyun},
+		{"explicit_tencent", CloudProviderTencent, "storage.googleapis.com", CloudProviderTencent},
+		{"explicit_huawei", CloudProviderHuawei, "oss-cn-hangzhou.aliyuncs.com", CloudProviderHuawei},
+		{"default_gcp", "", "storage.googleapis.com", CloudProviderGCP},
+		{"aws_gcp_with_port", CloudProviderAWS, "storage.googleapis.com:443", CloudProviderGCP},
+		{"unknown_gcp", "minio", "storage.googleapis.com", CloudProviderGCP},
+		{"default_aliyun", "", "oss-cn-hangzhou.aliyuncs.com", CloudProviderAliyun},
+		{"aws_aliyun", CloudProviderAWS, "oss-cn-hangzhou.aliyuncs.com", CloudProviderAliyun},
+		{"gcp_endpoint_precedence", "", "storage.googleapis.com.oss.aliyuncs.com", CloudProviderGCP},
+		{"aws", CloudProviderAWS, "s3.amazonaws.com", CloudProviderAWS},
+		{"default_minio", "", "localhost:9000", ""},
+		{"unknown_provider", "minio", "localhost:9000", "minio"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := Config{CloudProvider: tc.provider, Address: tc.address}
+			original := config
+			assert.Equal(t, tc.want, ResolveCloudProvider(&config))
+			assert.Equal(t, original, config)
+			config.CloudProvider = tc.want
+			assert.Equal(t, tc.want, ResolveCloudProvider(&config), "resolution must be idempotent")
+		})
+	}
+}
+
+func TestIsGcsNotExist(t *testing.T) {
+	notFound := &googleapi.Error{Code: http.StatusNotFound}
+	// cloud.google.com/go/storage >= v1.51 formats not-found errors this way
+	// (see formatObjectErr / formatBucketError).
+	libBucketNotExist := fmt.Errorf("%w: %w", storage.ErrBucketNotExist, notFound)
+	libObjectNotExist := fmt.Errorf("%w: %w", storage.ErrObjectNotExist, notFound)
+
+	tests := []struct {
+		name         string
+		err          error
+		bucketExpect bool
+		objectExpect bool
+	}{
+		{"nil", nil, false, false},
+		{"unrelated", errors.New("boom"), false, false},
+		{"bare googleapi 404", notFound, false, false},
+		{"bare bucket sentinel", storage.ErrBucketNotExist, true, false},
+		{"bare object sentinel", storage.ErrObjectNotExist, false, true},
+		{"multi-wrapped bucket sentinel", libBucketNotExist, true, false},
+		{"multi-wrapped object sentinel", libObjectNotExist, false, true},
+		{"cockroach-wrapped multi-wrapped bucket", errors.Wrap(libBucketNotExist, "attrs"), true, false},
+		{"cockroach-wrapped multi-wrapped object", errors.Wrap(libObjectNotExist, "attrs"), false, true},
+		{"nested multi-wrapped object", fmt.Errorf("%w; %w", errors.New("other"), libObjectNotExist), false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.bucketExpect, IsGcsBucketNotExist(tt.err))
+			assert.Equal(t, tt.objectExpect, IsGcsObjectNotExist(tt.err))
+		})
+	}
+}
+
+func TestParseTLSMinVersion(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected uint16
+		hasError bool
+	}{
+		{"1.0", tls.VersionTLS10, false},
+		{"1.1", tls.VersionTLS11, false},
+		{"1.2", tls.VersionTLS12, false},
+		{"1.3", tls.VersionTLS13, false},
+		{"", 0, true},
+		{"2.0", 0, true},
+		{"invalid", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			ver, err := parseTLSMinVersion(tt.input)
+			if tt.hasError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, ver)
+			}
+		})
+	}
+}
+
+// TestNewTLSHTTPClientTransportConfig verifies that newTLSHTTPClient
+// correctly sets MinVersion on the Transport's TLSClientConfig.
+func TestNewTLSHTTPClientTransportConfig(t *testing.T) {
+	tests := []struct {
+		input       string
+		expectedMin uint16
+	}{
+		{"1.0", tls.VersionTLS10},
+		{"1.1", tls.VersionTLS11},
+		{"1.2", tls.VersionTLS12},
+		{"1.3", tls.VersionTLS13},
+	}
+	for _, tt := range tests {
+		t.Run("min_version_"+tt.input, func(t *testing.T) {
+			client, err := newTLSHTTPClient(tt.input)
+			require.NoError(t, err)
+			require.NotNil(t, client)
+
+			tr, ok := client.Transport.(*http.Transport)
+			require.True(t, ok, "Transport should be *http.Transport")
+			require.NotNil(t, tr.TLSClientConfig)
+			assert.Equal(t, tt.expectedMin, tr.TLSClientConfig.MinVersion)
+		})
+	}
+
+	t.Run("invalid_version", func(t *testing.T) {
+		_, err := newTLSHTTPClient("2.0")
+		assert.Error(t, err)
+	})
+
+	t.Run("preserves_default_transport_settings", func(t *testing.T) {
+		client, err := newTLSHTTPClient("1.3")
+		require.NoError(t, err)
+
+		tr := client.Transport.(*http.Transport)
+		defaultTr := http.DefaultTransport.(*http.Transport)
+		// Verify key settings from DefaultTransport are preserved
+		assert.Equal(t, defaultTr.MaxIdleConns, tr.MaxIdleConns)
+		assert.Equal(t, defaultTr.IdleConnTimeout, tr.IdleConnTimeout)
+		assert.Equal(t, defaultTr.ForceAttemptHTTP2, tr.ForceAttemptHTTP2)
+	})
+}
+
+// TestNewTLSHTTPClientRejectsLowerVersion starts a TLS 1.2-only server
+// and verifies that a client configured with MinVersion=1.3 cannot connect.
+// This proves the TLS version config actually takes effect.
+func TestNewTLSHTTPClientRejectsLowerVersion(t *testing.T) {
+	// Start a TLS server that only supports TLS 1.2
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS12,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	t.Run("tls13_client_fails_against_tls12_server", func(t *testing.T) {
+		client, err := newTLSHTTPClient("1.3")
+		require.NoError(t, err)
+
+		// Trust the test server's self-signed cert
+		tr := client.Transport.(*http.Transport)
+		tr.TLSClientConfig.InsecureSkipVerify = true
+
+		_, err = client.Get(server.URL)
+		require.Error(t, err, "TLS 1.3 client must fail against TLS 1.2-only server")
+		t.Logf("confirmed: TLS 1.3 client rejected TLS 1.2 server: %v", err)
+	})
+
+	t.Run("tls12_client_succeeds_against_tls12_server", func(t *testing.T) {
+		client, err := newTLSHTTPClient("1.2")
+		require.NoError(t, err)
+
+		tr := client.Transport.(*http.Transport)
+		tr.TLSClientConfig.InsecureSkipVerify = true
+
+		resp, err := client.Get(server.URL)
+		require.NoError(t, err, "TLS 1.2 client should succeed against TLS 1.2 server")
+		defer resp.Body.Close()
+
+		require.NotNil(t, resp.TLS)
+		assert.Equal(t, uint16(tls.VersionTLS12), resp.TLS.Version)
+		t.Logf("confirmed: negotiated %s", tlsVersionName(resp.TLS.Version))
+	})
+}
+
+func TestNewMinioClientInferredGCP(t *testing.T) {
+	for _, provider := range []string{"", CloudProviderAWS} {
+		for _, useIAM := range []bool{false, true} {
+			t.Run(fmt.Sprintf("provider=%s/iam=%t", provider, useIAM), func(t *testing.T) {
+				config := Config{
+					Address: "storage.googleapis.com:443", CloudProvider: provider,
+					UseSSL: true, UseIAM: useIAM, SkipBucketCheck: true,
+					BucketName: "src-bucket", AccessKeyID: "access-key", SecretAccessKeyID: "secret-key",
+				}
+				original := config
+				client, err := NewMinioClient(context.Background(), &config)
+				require.NoError(t, err)
+				// The GCP constructor removes the port so the SDK recognizes GCS.
+				assert.Equal(t, "storage.googleapis.com", client.EndpointURL().Host)
+				assert.Equal(t, original, config)
+			})
+		}
+	}
+}
+
+func TestNewMinioClientSkipsBucketCheck(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		http.Error(w, "bucket-level access denied", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client, err := NewMinioClient(context.Background(), &Config{
+		Address:           strings.TrimPrefix(server.URL, "http://"),
+		BucketName:        "restricted-bucket",
+		AccessKeyID:       "access-key",
+		SecretAccessKeyID: "secret-key",
+		SkipBucketCheck:   true,
+	})
+
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+	assert.Zero(t, requestCount.Load())
+}
+
+func TestNewAzureClientCredentialPrecedence(t *testing.T) {
+	accountKey := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	t.Setenv("AZURE_STORAGE_CONNECTION_STRING",
+		"DefaultEndpointsProtocol=https;AccountName=ambientaccount;AccountKey="+accountKey+";EndpointSuffix=core.windows.net")
+
+	newConfig := func(ignoreConnectionString bool) *Config {
+		return &Config{
+			Address:                     "core.windows.net",
+			BucketName:                  "container",
+			AccessKeyID:                 "requestaccount",
+			SecretAccessKeyID:           accountKey,
+			SkipBucketCheck:             true,
+			IgnoreAzureConnectionString: ignoreConnectionString,
+		}
+	}
+
+	t.Run("instance configuration keeps ambient connection string", func(t *testing.T) {
+		client, err := NewAzureObjectStorageClient(context.Background(), newConfig(false))
+
+		require.NoError(t, err)
+		assert.Equal(t, "https://ambientaccount.blob.core.windows.net/", client.URL())
+	})
+
+	t.Run("request credentials override ambient connection string", func(t *testing.T) {
+		client, err := NewAzureObjectStorageClient(context.Background(), newConfig(true))
+
+		require.NoError(t, err)
+		assert.Equal(t, "https://requestaccount.blob.core.windows.net/", client.URL())
+	})
+}
+
+func tlsVersionName(v uint16) string {
+	switch v {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return "unknown"
+	}
+}
+
+// TestNewMinioClientTLSVersion tests TLS version configuration via NewMinioClient.
+// Auth: ACCESS_KEY+SECRET_KEY, or USE_IAM=true.
+//
+// ACCESS_KEY+SECRET_KEY require:
+//   - ADDRESS, BUCKET_NAME, CLOUD_PROVIDER, ACCESS_KEY, SECRET_KEY. Optional: REGION.
+//
+// USE_IAM require:
+//   - ADDRESS, BUCKET_NAME, CLOUD_PROVIDER, USE_IAM=true. Optional: REGION.
+//
+// CLOUD_PROVIDER: aws or gcp (S3 compatibility mode, supports AK/SK or IAM).
+func TestNewMinioClientTLSVersion(t *testing.T) {
+	address := os.Getenv("ADDRESS")
+	accessKey := os.Getenv("ACCESS_KEY")
+	secretKey := os.Getenv("SECRET_KEY")
+	bucketName := os.Getenv("BUCKET_NAME")
+	region := os.Getenv("REGION")
+	cloudProvider := os.Getenv("CLOUD_PROVIDER")
+	useIAM := os.Getenv("USE_IAM") == "true"
+
+	if address == "" || bucketName == "" {
+		t.Skip("Skipping: set ADDRESS, BUCKET_NAME env vars to run this test")
+	}
+	hasAKSK := accessKey != "" && secretKey != ""
+	if !hasAKSK && !useIAM {
+		t.Skip("Skipping: set ACCESS_KEY+SECRET_KEY or USE_IAM=true to run this test")
+	}
+	if cloudProvider == "" {
+		cloudProvider = "aws"
+	}
+
+	newConfig := func(tlsMinVersion string) *Config {
+		return &Config{
+			Address:           address,
+			AccessKeyID:       accessKey,
+			SecretAccessKeyID: secretKey,
+			BucketName:        bucketName,
+			Region:            region,
+			UseSSL:            true,
+			SslTLSMinVersion:  tlsMinVersion,
+			CloudProvider:     cloudProvider,
+			UseIAM:            useIAM,
+		}
+	}
+
+	ctx := context.Background()
+
+	t.Run("check_server_tls_support", func(t *testing.T) {
+		for _, ver := range []struct {
+			name string
+			ver  uint16
+		}{
+			{"TLS 1.2", tls.VersionTLS12},
+			{"TLS 1.3", tls.VersionTLS13},
+		} {
+			conn, err := tls.Dial("tcp", address+":443", &tls.Config{
+				MinVersion: ver.ver,
+				MaxVersion: ver.ver,
+			})
+			if err != nil {
+				t.Logf("%s -> %s: NOT supported (%v)", address, ver.name, err)
+			} else {
+				state := conn.ConnectionState()
+				t.Logf("%s -> %s: supported (negotiated: %s)", address, ver.name, tlsVersionName(state.Version))
+				conn.Close()
+			}
+		}
+	})
+
+	t.Run("tls12_via_NewMinioClient", func(t *testing.T) {
+		client, err := NewMinioClient(ctx, newConfig("1.2"))
+		require.NoError(t, err, "NewMinioClient with TLS 1.2 should succeed")
+
+		exists, err := client.BucketExists(ctx, bucketName)
+		require.NoError(t, err, "BucketExists should succeed over TLS 1.2")
+		assert.True(t, exists, "bucket %s should exist", bucketName)
+		t.Logf("NewMinioClient(SslTLSMinVersion=1.2, CloudProvider=%s, UseIAM=%v): BucketExists(%s) = %v", cloudProvider, useIAM, bucketName, exists)
+	})
+
+	t.Run("tls13_via_NewMinioClient", func(t *testing.T) {
+		conn, err := tls.Dial("tcp", address+":443", &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		})
+		if err != nil {
+			t.Skipf("Skipping: %s does not support TLS 1.3 (%v)", address, err)
+		}
+		conn.Close()
+
+		client, err := NewMinioClient(ctx, newConfig("1.3"))
+		require.NoError(t, err, "NewMinioClient with TLS 1.3 should succeed")
+
+		exists, err := client.BucketExists(ctx, bucketName)
+		require.NoError(t, err, "BucketExists should succeed over TLS 1.3")
+		assert.True(t, exists, "bucket %s should exist", bucketName)
+		t.Logf("NewMinioClient(SslTLSMinVersion=1.3, CloudProvider=%s, UseIAM=%v): BucketExists(%s) = %v", cloudProvider, useIAM, bucketName, exists)
+	})
+}
+
+// TestNewAzureClientTLSVersion tests TLS version configuration via NewAzureObjectStorageClient.
+//
+// Require:
+//   - ADDRESS, BUCKET_NAME, CLOUD_PROVIDER=azure, ACCESS_KEY (storage account name), SECRET_KEY (storage account key).
+func TestNewAzureClientTLSVersion(t *testing.T) {
+	address := os.Getenv("ADDRESS")
+	accessKey := os.Getenv("ACCESS_KEY")
+	secretKey := os.Getenv("SECRET_KEY")
+	bucketName := os.Getenv("BUCKET_NAME")
+	cloudProvider := os.Getenv("CLOUD_PROVIDER")
+
+	if cloudProvider != "azure" {
+		t.Skip("Skipping: CLOUD_PROVIDER is not azure")
+	}
+	if address == "" || accessKey == "" || secretKey == "" || bucketName == "" {
+		t.Skip("Skipping: set ADDRESS, ACCESS_KEY, SECRET_KEY, BUCKET_NAME env vars to run this test")
+	}
+
+	ctx := context.Background()
+
+	// Probe TLS support on the Azure Blob endpoint
+	azureHost := accessKey + ".blob." + address
+	t.Run("check_server_tls_support", func(t *testing.T) {
+		for _, ver := range []struct {
+			name string
+			ver  uint16
+		}{
+			{"TLS 1.2", tls.VersionTLS12},
+			{"TLS 1.3", tls.VersionTLS13},
+		} {
+			conn, err := tls.Dial("tcp", azureHost+":443", &tls.Config{
+				MinVersion: ver.ver,
+				MaxVersion: ver.ver,
+			})
+			if err != nil {
+				t.Logf("%s -> %s: NOT supported (%v)", azureHost, ver.name, err)
+			} else {
+				state := conn.ConnectionState()
+				t.Logf("%s -> %s: supported (negotiated: %s)", azureHost, ver.name, tlsVersionName(state.Version))
+				conn.Close()
+			}
+		}
+	})
+
+	t.Run("tls12_via_NewAzureObjectStorageClient", func(t *testing.T) {
+		c := &Config{
+			Address:           address,
+			AccessKeyID:       accessKey,
+			SecretAccessKeyID: secretKey,
+			BucketName:        bucketName,
+			UseSSL:            true,
+			SslTLSMinVersion:  "1.2",
+			CloudProvider:     cloudProvider,
+		}
+
+		client, err := NewAzureObjectStorageClient(ctx, c)
+		require.NoError(t, err, "NewAzureObjectStorageClient with TLS 1.2 should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewAzureObjectStorageClient(SslTLSMinVersion=1.2): success")
+	})
+
+	t.Run("tls13_via_NewAzureObjectStorageClient", func(t *testing.T) {
+		conn, err := tls.Dial("tcp", azureHost+":443", &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		})
+		if err != nil {
+			t.Skipf("Skipping: %s does not support TLS 1.3 (%v)", azureHost, err)
+		}
+		conn.Close()
+
+		c := &Config{
+			Address:           address,
+			AccessKeyID:       accessKey,
+			SecretAccessKeyID: secretKey,
+			BucketName:        bucketName,
+			UseSSL:            true,
+			SslTLSMinVersion:  "1.3",
+			CloudProvider:     cloudProvider,
+		}
+
+		client, err := NewAzureObjectStorageClient(ctx, c)
+		require.NoError(t, err, "NewAzureObjectStorageClient with TLS 1.3 should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewAzureObjectStorageClient(SslTLSMinVersion=1.3): success")
+	})
+
+	t.Run("no_tls_version_set", func(t *testing.T) {
+		c := &Config{
+			Address:           address,
+			AccessKeyID:       accessKey,
+			SecretAccessKeyID: secretKey,
+			BucketName:        bucketName,
+			UseSSL:            true,
+			CloudProvider:     cloudProvider,
+		}
+
+		client, err := NewAzureObjectStorageClient(ctx, c)
+		require.NoError(t, err, "NewAzureObjectStorageClient without TLS version should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewAzureObjectStorageClient(SslTLSMinVersion=<empty>): success (default behavior)")
+	})
+}
+
+// TestNewGcpNativeClientTLSVersion tests TLS version configuration via NewGcpObjectStorageClient.
+// Auth: GCP_CREDENTIAL_JSON, or USE_IAM=true (uses ADC).
+//
+// GCP_CREDENTIAL_JSON require:
+//   - BUCKET_NAME, CLOUD_PROVIDER=gcpnative, GCP_CREDENTIAL_JSON (service account JSON string).
+//
+// USE_IAM require:
+//   - BUCKET_NAME, CLOUD_PROVIDER=gcpnative, USE_IAM=true.
+func TestNewGcpNativeClientTLSVersion(t *testing.T) {
+	bucketName := os.Getenv("BUCKET_NAME")
+	cloudProvider := os.Getenv("CLOUD_PROVIDER")
+	gcpCredentialJSON := os.Getenv("GCP_CREDENTIAL_JSON")
+	useIAM := os.Getenv("USE_IAM") == "true"
+
+	if cloudProvider != "gcpnative" {
+		t.Skip("Skipping: CLOUD_PROVIDER is not gcpnative")
+	}
+	if bucketName == "" {
+		t.Skip("Skipping: set BUCKET_NAME env var to run this test")
+	}
+	if gcpCredentialJSON == "" && !useIAM {
+		t.Skip("Skipping: set GCP_CREDENTIAL_JSON or USE_IAM=true to run this test")
+	}
+
+	newConfig := func(tlsMinVersion string) *Config {
+		return &Config{
+			BucketName:        bucketName,
+			UseSSL:            true,
+			SslTLSMinVersion:  tlsMinVersion,
+			CloudProvider:     cloudProvider,
+			GcpCredentialJSON: gcpCredentialJSON,
+			UseIAM:            useIAM,
+		}
+	}
+
+	ctx := context.Background()
+	tlsHost := "storage.googleapis.com"
+
+	t.Run("check_server_tls_support", func(t *testing.T) {
+		for _, ver := range []struct {
+			name string
+			ver  uint16
+		}{
+			{"TLS 1.2", tls.VersionTLS12},
+			{"TLS 1.3", tls.VersionTLS13},
+		} {
+			conn, err := tls.Dial("tcp", tlsHost+":443", &tls.Config{
+				MinVersion: ver.ver,
+				MaxVersion: ver.ver,
+			})
+			if err != nil {
+				t.Logf("%s -> %s: NOT supported (%v)", tlsHost, ver.name, err)
+			} else {
+				state := conn.ConnectionState()
+				t.Logf("%s -> %s: supported (negotiated: %s)", tlsHost, ver.name, tlsVersionName(state.Version))
+				conn.Close()
+			}
+		}
+	})
+
+	t.Run("tls12_via_NewGcpObjectStorageClient", func(t *testing.T) {
+		client, err := NewGcpObjectStorageClient(ctx, newConfig("1.2"))
+		require.NoError(t, err, "NewGcpObjectStorageClient with TLS 1.2 should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewGcpObjectStorageClient(SslTLSMinVersion=1.2): success")
+	})
+
+	t.Run("tls13_via_NewGcpObjectStorageClient", func(t *testing.T) {
+		conn, err := tls.Dial("tcp", tlsHost+":443", &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		})
+		if err != nil {
+			t.Skipf("Skipping: %s does not support TLS 1.3 (%v)", tlsHost, err)
+		}
+		conn.Close()
+
+		client, err := NewGcpObjectStorageClient(ctx, newConfig("1.3"))
+		require.NoError(t, err, "NewGcpObjectStorageClient with TLS 1.3 should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewGcpObjectStorageClient(SslTLSMinVersion=1.3): success")
+	})
+
+	t.Run("no_tls_version_set", func(t *testing.T) {
+		client, err := NewGcpObjectStorageClient(ctx, newConfig(""))
+		require.NoError(t, err, "NewGcpObjectStorageClient without TLS version should succeed")
+		require.NotNil(t, client)
+		t.Logf("NewGcpObjectStorageClient(SslTLSMinVersion=<empty>): success (default behavior)")
+	})
+}

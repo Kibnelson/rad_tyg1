@@ -1,0 +1,256 @@
+import struct
+from types import SimpleNamespace
+
+import orjson
+import pytest
+from pymilvus.client.field_data_extractors import (
+    array_cell_length,
+    decode_array_value,
+    decode_cell,
+    decode_range,
+    decode_vector_array_value,
+    dense_vector_width,
+    get_field_data,
+    physical_index,
+    vector_array_length,
+)
+from pymilvus.client.types import DataType
+from pymilvus.exceptions import MilvusException, ParamError
+from pymilvus.grpc_gen import schema_pb2
+
+
+def _scalar_field(dtype, name, data, valid_data=None):
+    scalar_map = {
+        DataType.BOOL: lambda d: schema_pb2.ScalarField(bool_data=schema_pb2.BoolArray(data=d)),
+        DataType.INT32: lambda d: schema_pb2.ScalarField(int_data=schema_pb2.IntArray(data=d)),
+        DataType.INT64: lambda d: schema_pb2.ScalarField(long_data=schema_pb2.LongArray(data=d)),
+        DataType.FLOAT: lambda d: schema_pb2.ScalarField(float_data=schema_pb2.FloatArray(data=d)),
+        DataType.DOUBLE: lambda d: schema_pb2.ScalarField(
+            double_data=schema_pb2.DoubleArray(data=d)
+        ),
+        DataType.VARCHAR: lambda d: schema_pb2.ScalarField(
+            string_data=schema_pb2.StringArray(data=d)
+        ),
+        DataType.TEXT: lambda d: schema_pb2.ScalarField(string_data=schema_pb2.StringArray(data=d)),
+        DataType.JSON: lambda d: schema_pb2.ScalarField(json_data=schema_pb2.JSONArray(data=d)),
+    }
+    return schema_pb2.FieldData(
+        type=dtype,
+        field_name=name,
+        scalars=scalar_map[dtype](data),
+        valid_data=valid_data or [],
+    )
+
+
+def _vector_field(dtype, name, dim, data, valid_data=None):
+    vector_args = {"dim": dim}
+    if dtype == DataType.FLOAT_VECTOR:
+        vector_args["float_vector"] = schema_pb2.FloatArray(data=data)
+    elif dtype == DataType.BINARY_VECTOR:
+        vector_args["binary_vector"] = data
+    elif dtype == DataType.FLOAT16_VECTOR:
+        vector_args["float16_vector"] = data
+    elif dtype == DataType.BFLOAT16_VECTOR:
+        vector_args["bfloat16_vector"] = data
+    elif dtype == DataType.INT8_VECTOR:
+        vector_args["int8_vector"] = data
+    return schema_pb2.FieldData(
+        type=dtype,
+        field_name=name,
+        vectors=schema_pb2.VectorField(**vector_args),
+        valid_data=valid_data or [],
+    )
+
+
+def test_decode_scalar_json_and_array_cells():
+    scalar = _scalar_field(DataType.TEXT, "text", ["a", "b"], valid_data=[True, False])
+    json_field = _scalar_field(DataType.JSON, "json", [orjson.dumps({"x": 1})])
+    array_field = schema_pb2.FieldData(type=DataType.ARRAY, field_name="array")
+    array_field.scalars.array_data.element_type = DataType.INT32
+    array_field.scalars.array_data.data.append(
+        schema_pb2.ScalarField(int_data=schema_pb2.IntArray(data=[1, 2]))
+    )
+
+    assert get_field_data(scalar) == ["a", "b"]
+    assert decode_range(scalar, 0, 2) == ["a", None]
+    assert decode_cell(json_field, 0) == {"x": 1}
+    decoded_array = decode_cell(array_field, 0)
+    assert decoded_array == [1, 2]
+    assert isinstance(decoded_array, list)
+
+
+def test_decode_nullable_scalar_range_scans_validity_once():
+    class CountingValidity:
+        def __init__(self, values):
+            self.values = values
+            self.scanned_values = 0
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            values = self.values[key]
+            self.scanned_values += len(values) if isinstance(key, slice) else 1
+            return values
+
+    validity = CountingValidity([True, False, True, True])
+    field = SimpleNamespace(
+        type=DataType.VARCHAR,
+        scalars=SimpleNamespace(
+            string_data=SimpleNamespace(data=["a", "b", "c", "d"]),
+        ),
+        valid_data=validity,
+    )
+
+    assert decode_range(field, 1, 4) == [None, "c", "d"]
+    assert validity.scanned_values == 3
+
+
+@pytest.mark.parametrize(
+    ("dtype", "dim", "payload", "expected_width", "expected"),
+    [
+        (DataType.FLOAT_VECTOR, 2, [1.0, 2.0, 3.0, 4.0], 2, [3.0, 4.0]),
+        (DataType.BINARY_VECTOR, 16, b"abcd", 2, b"cd"),
+        (DataType.FLOAT16_VECTOR, 2, b"abcdefgh", 4, b"efgh"),
+        (DataType.BFLOAT16_VECTOR, 2, b"ijklmnop", 4, b"mnop"),
+        (DataType.INT8_VECTOR, 2, b"qrst", 2, b"st"),
+    ],
+)
+def test_decode_dense_vector_cells_from_type_info_widths(
+    dtype, dim, payload, expected_width, expected
+):
+    field = _vector_field(dtype, "vector", dim, payload)
+
+    assert dense_vector_width(dtype, dim) == expected_width
+    assert decode_cell(field, 1) == expected
+
+
+def test_decode_dense_vector_cell_wraps_byte_vectors_when_requested():
+    field = _vector_field(DataType.INT8_VECTOR, "vector", 2, b"abcd")
+
+    assert decode_cell(field, 1, wrap_byte_vectors=True) == [b"cd"]
+
+
+def test_decode_nullable_vector_cell_uses_physical_index():
+    field = _vector_field(
+        DataType.FLOAT_VECTOR,
+        "vector",
+        2,
+        [1.0, 2.0, 3.0, 4.0],
+        valid_data=[True, False, True],
+    )
+
+    assert physical_index(field, 2) == 1
+    assert decode_cell(field, 1) is None
+    assert decode_cell(field, 2) == [3.0, 4.0]
+
+
+def test_decode_sparse_vector_cell():
+    sparse = schema_pb2.SparseFloatArray(
+        contents=[struct.pack("If", 7, 0.5), struct.pack("If", 9, 1.5)]
+    )
+    field = schema_pb2.FieldData(
+        type=DataType.SPARSE_FLOAT_VECTOR,
+        field_name="sparse",
+        vectors=schema_pb2.VectorField(sparse_float_vector=sparse),
+    )
+
+    assert decode_cell(field, 1) == {9: pytest.approx(1.5)}
+
+
+def test_decode_nullable_sparse_vector_cell_uses_physical_index():
+    sparse = schema_pb2.SparseFloatArray(
+        contents=[struct.pack("If", 1, 0.5), struct.pack("If", 5, 0.8)]
+    )
+    field = schema_pb2.FieldData(
+        type=DataType.SPARSE_FLOAT_VECTOR,
+        field_name="sparse",
+        vectors=schema_pb2.VectorField(sparse_float_vector=sparse),
+        valid_data=[True, False, True],
+    )
+
+    assert decode_cell(field, 0) == {1: pytest.approx(0.5)}
+    assert decode_cell(field, 1) is None
+    assert decode_cell(field, 2) == {5: pytest.approx(0.8)}
+
+
+def test_decode_array_of_vector_cell_splits_rows():
+    field = schema_pb2.FieldData(type=DataType._ARRAY_OF_VECTOR, field_name="vectors")
+    field.vectors.vector_array.element_type = DataType.FLOAT_VECTOR
+    vector = schema_pb2.VectorField(dim=2)
+    vector.float_vector.data.extend([1.0, 2.0, 3.0, 4.0])
+    field.vectors.vector_array.data.append(vector)
+
+    assert decode_cell(field, 0) == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_array_cell_helpers_use_type_info_array_element_attrs():
+    array_cell = schema_pb2.ScalarField(int_data=schema_pb2.IntArray(data=[10, 20]))
+
+    assert array_cell_length(array_cell) == 2
+    assert decode_array_value(array_cell, 1) == 20
+
+
+def test_array_cell_helpers_return_empty_for_unpopulated_cell():
+    array_cell = schema_pb2.ScalarField()
+
+    assert array_cell_length(array_cell) == 0
+    assert decode_array_value(array_cell, 0) is None
+
+
+@pytest.mark.parametrize(
+    ("dtype", "dim", "payload_attr", "payload", "expected"),
+    [
+        (DataType.FLOAT_VECTOR, 2, "float_vector", [1.0, 2.0, 3.0, 4.0], [3.0, 4.0]),
+        (DataType.FLOAT16_VECTOR, 2, "float16_vector", b"abcdefgh", b"efgh"),
+        (DataType.BFLOAT16_VECTOR, 2, "bfloat16_vector", b"ijklmnop", b"mnop"),
+        (DataType.INT8_VECTOR, 2, "int8_vector", b"qrst", b"st"),
+        (DataType.BINARY_VECTOR, 16, "binary_vector", b"uvwx", b"wx"),
+    ],
+)
+def test_vector_array_helpers_count_and_slice_type_info_widths(
+    dtype, dim, payload_attr, payload, expected
+):
+    vector = schema_pb2.VectorField(dim=dim)
+    if dtype == DataType.FLOAT_VECTOR:
+        getattr(vector, payload_attr).data.extend(payload)
+    else:
+        setattr(vector, payload_attr, payload)
+
+    assert vector_array_length(vector, dtype) == 2
+    assert decode_vector_array_value(vector, dtype, 1) == expected
+
+
+def test_vector_array_helpers_reject_unsupported_element_type():
+    vector = schema_pb2.VectorField(dim=2)
+    vector.sparse_float_vector.contents.append(b"bad")
+
+    with pytest.raises(ParamError, match="Unsupported vector array element type"):
+        vector_array_length(vector, DataType.SPARSE_FLOAT_VECTOR)
+
+    with pytest.raises(ParamError, match="Unsupported vector array element type"):
+        decode_vector_array_value(vector, DataType.SPARSE_FLOAT_VECTOR, 0)
+
+
+def test_vector_array_helpers_handle_empty_and_zero_width_rows():
+    empty = schema_pb2.VectorField()
+
+    assert vector_array_length(empty, DataType.NONE) == 0
+    assert decode_vector_array_value(empty, DataType.NONE, 0) is None
+
+    zero_dim = schema_pb2.VectorField(dim=0, float_vector=schema_pb2.FloatArray(data=[1.0]))
+
+    assert vector_array_length(zero_dim, DataType.FLOAT_VECTOR) == 0
+    assert decode_vector_array_value(zero_dim, DataType.FLOAT_VECTOR, 0) is None
+
+
+def test_decode_vector_array_value_returns_none_for_short_payload():
+    vector = schema_pb2.VectorField(dim=2)
+    vector.float_vector.data.extend([1.0])
+
+    assert decode_vector_array_value(vector, DataType.FLOAT_VECTOR, 0) is None
+
+
+def test_decode_unsupported_field_type_raises():
+    with pytest.raises(MilvusException, match="Unsupported field type"):
+        decode_cell(schema_pb2.FieldData(type=DataType.NONE), 0)

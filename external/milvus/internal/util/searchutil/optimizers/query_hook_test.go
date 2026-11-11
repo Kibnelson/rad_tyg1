@@ -1,0 +1,771 @@
+package optimizers
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/milvus-io/milvus/internal/mocks/util/searchutil/mock_optimizers"
+	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+)
+
+type QueryHookSuite struct {
+	suite.Suite
+	queryHook QueryHook
+}
+
+func (suite *QueryHookSuite) SetupTest() {
+}
+
+func (suite *QueryHookSuite) TearDownTest() {
+	suite.queryHook = nil
+}
+
+func (suite *QueryHookSuite) TestOptimizeSearchParam() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	paramtable.Init()
+	paramtable.Get().Save(paramtable.Get().AutoIndexConfig.EnableOptimize.Key, "true")
+
+	suite.Run("normal_run", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			params[common.TopKKey] = int64(50)
+			params[common.SearchParamKey] = `{"param": 2}`
+			params[common.RecallEvalKey] = true
+		}).Return(nil)
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			suite.queryHook = nil
+		}()
+
+		getPlan := func(topk int64, groupByField int64) *planpb.PlanNode {
+			return &planpb.PlanNode{
+				Node: &planpb.PlanNode_VectorAnns{
+					VectorAnns: &planpb.VectorANNS{
+						QueryInfo: &planpb.QueryInfo{
+							Topk:           topk,
+							SearchParams:   `{"param": 1}`,
+							GroupByFieldId: groupByField,
+						},
+					},
+				},
+			}
+		}
+
+		bs, err := proto.Marshal(getPlan(100, 101))
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				IsTopkReduce:       true,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 50, true, false, `{"param": 2}`)
+
+		bs, err = proto.Marshal(getPlan(50, -1))
+		suite.Require().NoError(err)
+		req, err = OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				IsTopkReduce:       true,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 50, false, true, `{"param": 2}`)
+	})
+
+	suite.Run("disable optimization", func() {
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		suite.queryHook = mockHook
+		defer func() { suite.queryHook = nil }()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					QueryInfo: &planpb.QueryInfo{
+						Topk:         100,
+						SearchParams: `{"param": 1}`,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 100, false, false, `{"param": 1}`)
+	})
+
+	suite.Run("no_hook", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		defer paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+		suite.queryHook = nil
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					QueryInfo: &planpb.QueryInfo{
+						Topk:         100,
+						SearchParams: `{"param": 1}`,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				IsTopkReduce:       true,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 100, false, false, `{"param": 1}`)
+	})
+
+	suite.Run("knowhere_search_defaults", func() {
+		params := paramtable.Get()
+		searchKey := params.KnowhereConfig.IndexParam.KeyPrefix + "TEST_INDEX.search.default_param"
+		params.Save(params.AutoIndexConfig.Enable.Key, "true")
+		params.Save(params.KnowhereConfig.Enable.Key, "true")
+		params.Save(searchKey, "0.5")
+		defer params.Reset(params.AutoIndexConfig.Enable.Key)
+		defer params.Reset(params.KnowhereConfig.Enable.Key)
+		defer params.Remove(searchKey)
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					QueryInfo: &planpb.QueryInfo{
+						Topk:         100,
+						SearchParams: `{"request_param":16}`,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		for _, isSecondStageSearch := range []bool{false, true} {
+			req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+				Req: &internalpb.SearchRequest{
+					SerializedExprPlan: bs,
+					IsTopkReduce:       true,
+				},
+			}, nil, 2, isSecondStageSearch, func(int64) int64 { return 512 }, "TEST_INDEX")
+			suite.NoError(err)
+			suite.JSONEq(`{"default_param":0.5,"request_param":16}`, suite.getQueryInfo(req).GetSearchParams())
+			suite.False(req.GetReq().GetIsTopkReduce())
+		}
+
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			params[common.SearchParamKey] = `{"default_param":0.8,"hook_param":32}`
+		}).Return(nil)
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+			},
+		}, mockHook, 2, false, func(int64) int64 { return 512 }, "TEST_INDEX")
+		suite.NoError(err)
+		suite.JSONEq(`{"default_param":0.8,"hook_param":32}`, suite.getQueryInfo(req).GetSearchParams())
+	})
+
+	suite.Run("other_plannode", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			params[common.TopKKey] = int64(50)
+			params[common.SearchParamKey] = `{"param": 2}`
+		}).Return(nil).Maybe()
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_Query{},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.Equal(bs, req.GetReq().GetSerializedExprPlan())
+	})
+
+	suite.Run("no_serialized_plan", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		defer paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		suite.queryHook = mockHook
+		defer func() { suite.queryHook = nil }()
+
+		_, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req:             &internalpb.SearchRequest{},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.Error(err)
+	})
+
+	suite.Run("hook_run_error", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			params[common.TopKKey] = int64(50)
+			params[common.SearchParamKey] = `{"param": 2}`
+		}).Return(merr.WrapErrServiceInternal("mocked"))
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					QueryInfo: &planpb.QueryInfo{
+						Topk:         100,
+						SearchParams: `{"param": 1}`,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		_, err = OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+			},
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.Error(err)
+	})
+
+	suite.Run("global_refine_enabled", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key, "true")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineMinDimThreshold.Key, "256")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineSearchTopkRatio.Key, "4")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineRefineTopkRatio.Key, "2")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			suite.Equal(float32(4), params[common.SearchTopkRatioKey])
+			suite.Equal(float32(2), params[common.RefineTopkRatioKey])
+			params[common.GlobalRefineKey] = true
+		}).Return(nil)
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineMinDimThreshold.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineSearchTopkRatio.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineRefineTopkRatio.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					FieldId:    100,
+					VectorType: planpb.VectorType_FloatVector,
+					QueryInfo: &planpb.QueryInfo{
+						Topk:           100,
+						SearchParams:   `{"param": 1}`,
+						GroupByFieldId: -1,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				SearchType:         internalpb.SearchType_PURE_ANN_SEARCH_NO_FILTER,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(fieldID int64) int64 {
+			suite.EqualValues(100, fieldID)
+			return 512
+		}, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 100, false, false, `{"param": 1}`)
+		suite.verifyGlobalRefineRatios(req, 4, 2)
+	})
+
+	suite.Run("global_refine_ineligible", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key, "true")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			_, searchRatioExist := params[common.SearchTopkRatioKey]
+			_, refineRatioExist := params[common.RefineTopkRatioKey]
+			suite.False(searchRatioExist)
+			suite.False(refineRatioExist)
+		}).Return(nil)
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					FieldId:    100,
+					VectorType: planpb.VectorType_FloatVector,
+					QueryInfo: &planpb.QueryInfo{
+						Topk:           100,
+						SearchParams:   `{"param": 1}`,
+						GroupByFieldId: 101,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				SearchType:         internalpb.SearchType_PURE_ANN_SEARCH_NO_FILTER,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 100, false, false, `{"param": 1}`)
+		suite.verifyGlobalRefineRatios(req, 0, 0)
+	})
+
+	suite.Run("global_refine_skipped_for_non_pure_ann_search_type", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key, "true")
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.GlobalRefineMinDimThreshold.Key, "256")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			_, searchRatioExist := params[common.SearchTopkRatioKey]
+			_, refineRatioExist := params[common.RefineTopkRatioKey]
+			suite.False(searchRatioExist)
+			suite.False(refineRatioExist)
+		}).Return(nil)
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineEnable.Key)
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.GlobalRefineMinDimThreshold.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					FieldId:    100,
+					VectorType: planpb.VectorType_FloatVector,
+					QueryInfo: &planpb.QueryInfo{
+						Topk:           100,
+						SearchParams:   `{"param": 1}`,
+						GroupByFieldId: -1,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		req, err := OptimizeSearchParams(ctx, &querypb.SearchRequest{
+			Req: &internalpb.SearchRequest{
+				SerializedExprPlan: bs,
+				SearchType:         internalpb.SearchType_DEFAULT,
+			},
+			TotalChannelNum: 2,
+		}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		suite.NoError(err)
+		suite.verifyQueryInfo(req, 100, false, false, `{"param": 1}`)
+		suite.verifyGlobalRefineRatios(req, 0, 0)
+	})
+
+	suite.Run("global_refine_type_assertion_panic", func() {
+		paramtable.Get().Save(paramtable.Get().AutoIndexConfig.Enable.Key, "true")
+		mockHook := mock_optimizers.NewMockQueryHook(suite.T())
+		mockHook.EXPECT().Run(mock.Anything).Run(func(params map[string]any) {
+			params[common.GlobalRefineKey] = "true"
+		}).Return(nil)
+		suite.queryHook = mockHook
+		defer func() {
+			paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.Enable.Key)
+			suite.queryHook = nil
+		}()
+
+		plan := &planpb.PlanNode{
+			Node: &planpb.PlanNode_VectorAnns{
+				VectorAnns: &planpb.VectorANNS{
+					QueryInfo: &planpb.QueryInfo{
+						Topk:         100,
+						SearchParams: `{"param": 1}`,
+					},
+				},
+			},
+		}
+		bs, err := proto.Marshal(plan)
+		suite.Require().NoError(err)
+
+		suite.Panics(func() {
+			_, _ = OptimizeSearchParams(ctx, &querypb.SearchRequest{
+				Req: &internalpb.SearchRequest{
+					SerializedExprPlan: bs,
+				},
+			}, suite.queryHook, 2, false, func(int64) int64 { return 512 }, "")
+		})
+	})
+}
+
+func TestShouldUseTwoStageSearch(t *testing.T) {
+	paramtable.Init()
+	paramtable.Get().Save(paramtable.Get().AutoIndexConfig.TwoStageSearchEnabled.Key, "true")
+	paramtable.Get().Save(paramtable.Get().AutoIndexConfig.TwoStageSearchMinTopk.Key, "2000")
+	paramtable.Get().Save(paramtable.Get().AutoIndexConfig.TwoStageSearchMinNumSegments.Key, "5")
+	t.Cleanup(func() {
+		paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.TwoStageSearchEnabled.Key)
+		paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.TwoStageSearchMinTopk.Key)
+		paramtable.Get().Reset(paramtable.Get().AutoIndexConfig.TwoStageSearchMinNumSegments.Key)
+	})
+
+	tests := []struct {
+		name                string
+		twoStageEnabled     string
+		topk                int64
+		effectiveSegmentNum int
+		searchType          internalpb.SearchType
+		want                bool
+	}{
+		{
+			name:                "disabled",
+			twoStageEnabled:     "false",
+			topk:                3000,
+			effectiveSegmentNum: 10,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_WITH_FILTER,
+			want:                false,
+		},
+		{
+			name:                "segments_below_threshold",
+			topk:                3000,
+			effectiveSegmentNum: 3,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_WITH_FILTER,
+			want:                false,
+		},
+		{
+			name:                "topk_below_threshold",
+			topk:                1000,
+			effectiveSegmentNum: 10,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_WITH_FILTER,
+			want:                false,
+		},
+		{
+			name:                "thresholds_met_exactly",
+			topk:                2000,
+			effectiveSegmentNum: 5,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_WITH_FILTER,
+			want:                true,
+		},
+		{
+			name:                "thresholds_exceeded",
+			topk:                3000,
+			effectiveSegmentNum: 10,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_WITH_FILTER,
+			want:                true,
+		},
+		{
+			name:                "wrong_search_type",
+			topk:                3000,
+			effectiveSegmentNum: 10,
+			searchType:          internalpb.SearchType_PURE_ANN_SEARCH_NO_FILTER,
+			want:                false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.twoStageEnabled != "" {
+				paramtable.Get().Save(paramtable.Get().AutoIndexConfig.TwoStageSearchEnabled.Key, test.twoStageEnabled)
+				t.Cleanup(func() {
+					paramtable.Get().Save(paramtable.Get().AutoIndexConfig.TwoStageSearchEnabled.Key, "true")
+				})
+			}
+
+			req := &querypb.SearchRequest{
+				Req: &internalpb.SearchRequest{
+					Topk:       test.topk,
+					SearchType: test.searchType,
+				},
+			}
+			if got := ShouldUseTwoStageSearch(req, test.effectiveSegmentNum); got != test.want {
+				t.Fatalf("ShouldUseTwoStageSearch() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func (suite *QueryHookSuite) verifyQueryInfo(req *querypb.SearchRequest, topK int64, isTopkReduce bool, isRecallEvaluation bool, param string) {
+	queryInfo := suite.getQueryInfo(req)
+	suite.Equal(topK, queryInfo.GetTopk())
+	suite.Equal(param, queryInfo.GetSearchParams())
+	suite.Equal(isTopkReduce, req.GetReq().GetIsTopkReduce())
+	suite.Equal(isRecallEvaluation, req.GetReq().GetIsRecallEvaluation())
+}
+
+func (suite *QueryHookSuite) verifyGlobalRefineRatios(req *querypb.SearchRequest, searchTopkRatio float32, refineTopkRatio float32) {
+	queryInfo := suite.getQueryInfo(req)
+	suite.Equal(searchTopkRatio, queryInfo.GetSearchTopkRatio())
+	suite.Equal(refineTopkRatio, queryInfo.GetRefineTopkRatio())
+}
+
+func (suite *QueryHookSuite) getQueryInfo(req *querypb.SearchRequest) *planpb.QueryInfo {
+	planBytes := req.GetReq().GetSerializedExprPlan()
+
+	plan := planpb.PlanNode{}
+	err := proto.Unmarshal(planBytes, &plan)
+	suite.Require().NoError(err)
+
+	return plan.GetVectorAnns().GetQueryInfo()
+}
+
+func TestOptimizeSearchParam(t *testing.T) {
+	suite.Run(t, new(QueryHookSuite))
+}
+
+func (suite *QueryHookSuite) TestStrictGroupServerSettings() {
+	for _, tc := range []struct {
+		name     string
+		singular int64
+		plural   []int64
+	}{
+		{"legacy singular", 101, nil},
+		{"plural with unset singular", 0, []int64{101}},
+		{"aggregation plural", -1, []int64{101}},
+		{"both representations", 101, []int64{101}},
+		{"multiple fields", -1, []int64{101, 102}},
+	} {
+		suite.Run(tc.name, func() {
+			suite.checkStrictGroupServerSettings(tc.singular, tc.plural)
+		})
+	}
+}
+
+func (suite *QueryHookSuite) checkStrictGroupServerSettings(singular int64, plural []int64) {
+	paramtable.Init()
+	cfg := paramtable.Get()
+	sKey := cfg.QueryNodeCfg.StrictGroupStrategy.Key
+	defer cfg.Reset(sKey)
+	defer cfg.Reset(cfg.AutoIndexConfig.Enable.Key)
+	makeRequest := func(strict bool, raw string) *querypb.SearchRequest {
+		p := &planpb.PlanNode{Node: &planpb.PlanNode_VectorAnns{VectorAnns: &planpb.VectorANNS{
+			QueryInfo: &planpb.QueryInfo{
+				Topk: 10, GroupByFieldId: singular, GroupByFieldIds: plural,
+				GroupSize: 3, StrictGroupSize: strict, SearchParams: raw,
+			},
+		}}}
+		bs, err := proto.Marshal(p)
+		suite.Require().NoError(err)
+		return &querypb.SearchRequest{Req: &internalpb.SearchRequest{SerializedExprPlan: bs}}
+	}
+	readParams := func(req *querypb.SearchRequest) map[string]json.RawMessage {
+		p := &planpb.PlanNode{}
+		suite.Require().NoError(proto.Unmarshal(req.GetReq().GetSerializedExprPlan(), p))
+		var values map[string]json.RawMessage
+		suite.Require().NoError(json.Unmarshal([]byte(p.GetVectorAnns().GetQueryInfo().GetSearchParams()), &values))
+		return values
+	}
+	raw := `{"large":9007199254740993,"text":"0.5","strict_group_strategy":"invalid-client"}`
+	// Exercise no hook, AutoIndex disabled, a hook dropping all caller keys,
+	// and a hook injecting conflicting/invalid values.
+	for _, enabled := range []string{"false", "true"} {
+		cfg.Save(cfg.AutoIndexConfig.Enable.Key, enabled)
+		for _, hookOutput := range []string{"none", `{"large":9007199254740993,"text":"0.5"}`, raw} {
+			var hook QueryHook
+			if hookOutput != "none" {
+				h := mock_optimizers.NewMockQueryHook(suite.T())
+				if enabled == "true" {
+					h.EXPECT().Run(mock.Anything).Run(func(p map[string]any) {
+						p[common.SearchParamKey] = hookOutput
+					}).Return(nil)
+				}
+				hook = h
+			}
+			cfg.Save(sKey, "per_group")
+			req, err := OptimizeSearchParams(context.Background(), makeRequest(true, raw), hook, 1, false, nil, "")
+			suite.Require().NoError(err)
+			values := readParams(req)
+			suite.Equal(`"per_group"`, string(values[common.StrictGroupStrategyKey]))
+			suite.Equal("9007199254740993", string(values["large"]))
+			suite.Equal(`"0.5"`, string(values["text"]))
+			// Updating config affects a later request, not the serialized snapshot.
+			cfg.Save(sKey, "original")
+			next, err := OptimizeSearchParams(context.Background(), makeRequest(true, raw), nil, 1, false, nil, "")
+			suite.Require().NoError(err)
+			suite.Equal(`"original"`, string(readParams(next)[common.StrictGroupStrategyKey]))
+			suite.Equal(`"per_group"`, string(readParams(req)[common.StrictGroupStrategyKey]))
+		}
+	}
+	cfg.Reset(sKey)
+	defaultReq, err := OptimizeSearchParams(context.Background(), makeRequest(true, "{}"), nil, 1, false, nil, "")
+	suite.Require().NoError(err)
+	suite.Equal(`"per_group"`, string(readParams(defaultReq)[common.StrictGroupStrategyKey]))
+	// Both strategies are server controlled.
+	for _, strategy := range []string{"per_group", "original"} {
+		cfg.Save(sKey, strategy)
+		req, err := OptimizeSearchParams(context.Background(), makeRequest(true, raw), nil, 1, false, nil, "")
+		suite.Require().NoError(err)
+		suite.Equal(strconv.Quote(strategy), string(readParams(req)[common.StrictGroupStrategyKey]))
+	}
+	cfg.Reset(sKey)
+	// Caller-controlled values are removed even on non-strict queries.
+	plain, err := OptimizeSearchParams(context.Background(), makeRequest(false, raw), nil, 1, false, nil, "")
+	suite.Require().NoError(err)
+	suite.NotContains(readParams(plain), common.StrictGroupStrategyKey)
+	for key, badValues := range map[string][]string{
+		sKey: {"", "PER_GROUP", "other", "1", "sampling", "filtered_iterator"},
+	} {
+		for _, value := range badValues {
+			cfg.Save(key, value)
+			_, err := OptimizeSearchParams(context.Background(), makeRequest(true, "{}"), nil, 1, false, nil, "")
+			suite.ErrorIs(err, merr.ErrServiceUnavailable)
+			cfg.Reset(key)
+		}
+	}
+	for _, raw := range []string{"invalid", "[]", "1"} {
+		_, err := OptimizeSearchParams(context.Background(), makeRequest(true, raw), nil, 1, false, nil, "")
+		suite.Error(err)
+	}
+}
+
+func (suite *QueryHookSuite) TestStrictGroupConfigSnapshotLogsWeight() {
+	paramtable.Init()
+	cfg := paramtable.Get()
+	weightKey := cfg.QueryNodeCfg.StrictGroupPhase1CandidateWeight.Key
+	defer cfg.Reset(weightKey)
+	sink := mlog.CaptureGlobalLogs(suite.T(), &mlog.Config{Level: "info"})
+	info := &planpb.QueryInfo{
+		Topk: 50, GroupByFieldId: 101, GroupSize: 3, StrictGroupSize: true,
+		SearchParams: `{"private_payload":"must-not-be-logged"}`,
+	}
+	suite.Require().NoError(cfg.Save(weightKey, "50"))
+	_, err := applyStrictGroupSettings(context.Background(), info)
+	suite.Require().NoError(err)
+	suite.NotContains(sink.String(), "strict_group_config_snapshot")
+
+	mlog.SetLevel(mlog.DebugLevel)
+	_, err = applyStrictGroupSettings(context.Background(), info)
+	suite.Require().NoError(err)
+	suite.Contains(sink.String(), "strict_group_config_snapshot")
+	suite.Contains(sink.String(), "[DEBUG]")
+	suite.NotContains(sink.String(), "private_payload")
+	suite.NotContains(sink.String(), "search_params")
+	// The Go snapshot contains the configured weight, not the effective
+	// candidate limit (50 * 3 * 50 = 7500) computed later in C++.
+	suite.Contains(sink.String(), "[phase1_candidate_weight=50]")
+	suite.NotContains(sink.String(), "phase1_max_candidates")
+
+	suite.Require().NoError(cfg.Save(weightKey, "0"))
+	_, err = applyStrictGroupSettings(context.Background(), info)
+	suite.Require().NoError(err)
+	suite.Contains(sink.String(), "[phase1_candidate_weight=0]")
+
+	mlog.SetLevel(mlog.InfoLevel)
+	before := strings.Count(sink.String(), "strict_group_config_snapshot")
+	_, err = applyStrictGroupSettings(context.Background(), info)
+	suite.Require().NoError(err)
+	suite.Equal(before, strings.Count(sink.String(), "strict_group_config_snapshot"))
+}
+
+func (suite *QueryHookSuite) TestStrictGroupPhase1AndRefineSettings() {
+	paramtable.Init()
+	cfg := paramtable.Get()
+	weightKey := cfg.QueryNodeCfg.StrictGroupPhase1CandidateWeight.Key
+	skipKey := cfg.QueryNodeCfg.StrictGroupSkipRefine.Key
+	defer cfg.Reset(weightKey)
+	defer cfg.Reset(skipKey)
+	var previous *planpb.QueryInfo
+	for _, weight := range []string{"0", "50", "13", "0"} {
+		for _, skip := range []string{"false", "true"} {
+			cfg.Save(weightKey, weight)
+			cfg.Save(skipKey, skip)
+			info := &planpb.QueryInfo{
+				Topk: 50, GroupByFieldId: 101, GroupSize: 3, StrictGroupSize: true,
+				SearchParams: `{"strict_group_phase1_candidate_weight":"bad","strict_group_skip_refine":"bad","nprobe":128}`,
+			}
+			before := ""
+			if previous != nil {
+				before = previous.SearchParams
+			}
+			changed, err := applyStrictGroupSettings(context.Background(), info)
+			suite.Require().NoError(err)
+			suite.True(changed)
+			var values map[string]json.RawMessage
+			suite.Require().NoError(json.Unmarshal([]byte(info.SearchParams), &values))
+			suite.Equal(weight, string(values[common.StrictGroupPhase1CandidateWeightKey]))
+			suite.Equal(skip, string(values[common.StrictGroupSkipRefineKey]))
+			suite.Equal("128", string(values["nprobe"]))
+			if previous != nil {
+				suite.Equal(before, previous.SearchParams)
+			}
+			previous = info
+			for _, strict := range []bool{false, true} {
+				ineligible := &planpb.QueryInfo{
+					GroupByFieldId: 101, GroupSize: 1, StrictGroupSize: strict,
+					SearchParams: `{"strict_group_phase1_candidate_weight":5,"strict_group_skip_refine":true}`,
+				}
+				_, err = applyStrictGroupSettings(context.Background(), ineligible)
+				suite.Require().NoError(err)
+				suite.Equal("{}", ineligible.SearchParams)
+			}
+		}
+	}
+	for key, bad := range map[string][]string{
+		weightKey: {"-1", "1.5", "9223372036854775808", "bad"},
+		skipKey:   {"bad", "0.5", ""},
+	} {
+		for _, value := range bad {
+			cfg.Save(key, value)
+			_, err := applyStrictGroupSettings(context.Background(), &planpb.QueryInfo{
+				GroupByFieldId: 101, GroupSize: 3, StrictGroupSize: true,
+			})
+			suite.ErrorIs(err, merr.ErrServiceUnavailable)
+			cfg.Reset(key)
+		}
+	}
+}

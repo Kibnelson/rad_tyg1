@@ -1,0 +1,57 @@
+# IDE
+## Pycharm IDE
+/.idea
+
+.vscode
+
+*~
+
+# Python files
+*.pyc
+dist
+docs/build/
+*.egg
+*.egg-info
+*.eggs/
+**/__pycache__/
+.pytest*/
+/build/
+.remember
+venv/
+
+# Env
+.env
+.venv/
+
+# Local Temp
+temp/
+.worktrees/
+.worktree/
+*.swp
+assets/
+TODO
+
+# GitHub
+.coverage
+htmlcov/
+**/debug/
+.codecov.yml
+coverage.xml
+junit.xml
+
+# Example data
+/examples/bulk_writer
+
+# AI rules
+WARP.md
+CLAUDE.md
+AGENTS.md
+
+# perf
+*.svg
+**/.benchmarks/**
+*.html
+
+#cython
+*.so
+*.c

@@ -1,0 +1,62 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package binlog
+
+import (
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
+)
+
+type Filter func(row map[int64]interface{}) bool
+
+func FilterWithDelete(r *reader) (Filter, error) {
+	pkField, err := typeutil.GetPrimaryFieldSchema(r.schema)
+	if err != nil {
+		return nil, err
+	}
+	return func(row map[int64]interface{}) bool {
+		rowPk := row[pkField.GetFieldID()]
+		deleteTs, exists := r.deleteData[rowPk]
+		if !exists {
+			return true
+		}
+		rowTs := row[common.TimeStampField].(int64)
+		if r.snapshotSource != nil {
+			// Read validates the source invariant before applying any filter.
+			// Never use the destination Import job's timestamp for this test.
+			return deleteTs <= tsoutil.EffectiveTimestamp(uint64(rowTs), r.snapshotSource.GetSourceCommitTimestamp())
+		}
+		return int64(deleteTs) <= rowTs
+	}, nil
+}
+
+func FilterWithTimeRange(tsStart, tsEnd uint64) Filter {
+	return func(row map[int64]interface{}) bool {
+		ts := row[common.TimeStampField].(int64)
+		return uint64(ts) >= tsStart && uint64(ts) <= tsEnd
+	}
+}
+
+type L0Filter func(dl *storage.DeleteLog) bool
+
+func FilterDeleteWithTimeRange(tsStart, tsEnd uint64) L0Filter {
+	return func(dl *storage.DeleteLog) bool {
+		return dl.Ts >= tsStart && dl.Ts <= tsEnd
+	}
+}

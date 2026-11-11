@@ -1,0 +1,444 @@
+package objectstorage
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+
+	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
+	"github.com/cockroachdb/errors"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
+
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/objectstorage/aliyun"
+	"github.com/milvus-io/milvus/pkg/v3/objectstorage/gcp"
+	"github.com/milvus-io/milvus/pkg/v3/objectstorage/huawei"
+	"github.com/milvus-io/milvus/pkg/v3/objectstorage/tencent"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/retry"
+)
+
+const (
+	CloudProviderGCP       = "gcp"
+	CloudProviderGCPNative = "gcpnative"
+	CloudProviderAWS       = "aws"
+	CloudProviderAliyun    = "aliyun"
+	CloudProviderAzure     = "azure"
+	CloudProviderTencent   = "tencent"
+	CloudProviderHuawei    = "huawei"
+)
+
+var CheckBucketRetryAttempts uint = 20
+
+// ResolveCloudProvider applies the endpoint compatibility rules used by the
+// MinIO client factory without changing the caller's configuration.
+func ResolveCloudProvider(c *Config) string {
+	switch c.CloudProvider {
+	case CloudProviderAliyun, CloudProviderGCP, CloudProviderTencent, CloudProviderHuawei:
+		return c.CloudProvider
+	}
+	// Preserve endpoint inference for the default S3-compatible client path.
+	switch {
+	case strings.Contains(c.Address, gcp.GcsDefaultAddress):
+		return CloudProviderGCP
+	case strings.Contains(c.Address, aliyun.OSSAddressFeatureString):
+		return CloudProviderAliyun
+	default:
+		return c.CloudProvider
+	}
+}
+
+func NewMinioClient(ctx context.Context, c *Config) (*minio.Client, error) {
+	var creds *credentials.Credentials
+	newMinioFn := minio.New
+	bucketLookupType := minio.BucketLookupAuto
+
+	if c.UseVirtualHost {
+		bucketLookupType = minio.BucketLookupDNS
+	}
+
+	switch ResolveCloudProvider(c) {
+	case CloudProviderAliyun:
+		// auto doesn't work for aliyun, so we set to dns deliberately
+		bucketLookupType = minio.BucketLookupDNS
+		if c.UseIAM {
+			newMinioFn = aliyun.NewMinioClient
+		} else {
+			creds = credentials.NewStaticV4(c.AccessKeyID, c.SecretAccessKeyID, "")
+		}
+	case CloudProviderGCP:
+		newMinioFn = gcp.NewMinioClient
+		if !c.UseIAM {
+			creds = credentials.NewStaticV2(c.AccessKeyID, c.SecretAccessKeyID, "")
+		}
+	case CloudProviderTencent:
+		bucketLookupType = minio.BucketLookupDNS
+		newMinioFn = tencent.NewMinioClient
+		if !c.UseIAM {
+			creds = credentials.NewStaticV4(c.AccessKeyID, c.SecretAccessKeyID, "")
+		}
+	case CloudProviderHuawei:
+		bucketLookupType = minio.BucketLookupDNS
+		newMinioFn = huawei.NewMinioClient
+		if !c.UseIAM {
+			creds = credentials.NewStaticV4(c.AccessKeyID, c.SecretAccessKeyID, "")
+		}
+	default: // aws, minio
+		if c.UseIAM {
+			creds = credentials.NewIAM("")
+		} else {
+			creds = credentials.NewStaticV4(c.AccessKeyID, c.SecretAccessKeyID, "")
+		}
+	}
+
+	// We must set the cert path by os environment variable "SSL_CERT_FILE",
+	// because the minio.DefaultTransport() need this path to read the file content,
+	// we shouldn't read this file by ourself.
+	if c.UseSSL && len(c.SslCACert) > 0 {
+		err := os.Setenv("SSL_CERT_FILE", c.SslCACert)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	minioOpts := &minio.Options{
+		BucketLookup: bucketLookupType,
+		Creds:        creds,
+		Secure:       c.UseSSL,
+		Region:       c.Region,
+	}
+
+	if c.UseSSL && c.SslTLSMinVersion != "" && c.SslTLSMinVersion != "default" {
+		tr, err := minio.DefaultTransport(true)
+		if err != nil {
+			return nil, err
+		}
+		minVer, err := parseTLSMinVersion(c.SslTLSMinVersion)
+		if err != nil {
+			return nil, err
+		}
+		tr.TLSClientConfig.MinVersion = minVer
+		minioOpts.Transport = tr
+	}
+
+	minIOClient, err := newMinioFn(c.Address, minioOpts)
+	// options nil or invalid formatted endpoint, don't need to retry
+	if err != nil {
+		return nil, err
+	}
+	if c.BucketName == "" {
+		return nil, merr.WrapErrParameterInvalidMsg("invalid empty bucket name")
+	}
+	if c.SkipBucketCheck {
+		return minIOClient, nil
+	}
+	var bucketExists bool
+	// check valid in first query
+	checkBucketFn := func() error {
+		bucketExists, err = minIOClient.BucketExists(ctx, c.BucketName)
+		if err != nil {
+			mlog.Warn(ctx, "failed to check blob bucket exist", mlog.String("bucket", c.BucketName), mlog.Err(err))
+			return err
+		}
+		if !bucketExists {
+			if c.CreateBucket {
+				mlog.Info(ctx, "blob bucket not exist, create bucket.", mlog.String("bucket name", c.BucketName))
+				err := minIOClient.MakeBucket(ctx, c.BucketName, minio.MakeBucketOptions{})
+				if err != nil {
+					mlog.Warn(ctx, "failed to create blob bucket", mlog.String("bucket", c.BucketName), mlog.Err(err))
+					return err
+				}
+			} else {
+				return merr.WrapErrParameterInvalidMsg("bucket %s not Existed", c.BucketName)
+			}
+		}
+		return nil
+	}
+	err = retry.Do(ctx, checkBucketFn, retry.Attempts(CheckBucketRetryAttempts))
+	if err != nil {
+		return nil, err
+	}
+	return minIOClient, nil
+}
+
+func NewAzureObjectStorageClient(ctx context.Context, c *Config) (*service.Client, error) {
+	var client *service.Client
+	var err error
+
+	svcOpts := &service.ClientOptions{}
+	if c.UseSSL && c.SslTLSMinVersion != "" && c.SslTLSMinVersion != "default" {
+		httpClient, err := newTLSHTTPClient(c.SslTLSMinVersion)
+		if err != nil {
+			return nil, err
+		}
+		svcOpts.Transport = httpClient
+	}
+
+	if c.UseIAM {
+		var cred azcore.TokenCredential
+		var credErr error
+		if os.Getenv("AZURE_FEDERATED_TOKEN_FILE") != "" {
+			cred, credErr = azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+				ClientID:      os.Getenv("AZURE_CLIENT_ID"),
+				TenantID:      os.Getenv("AZURE_TENANT_ID"),
+				TokenFilePath: os.Getenv("AZURE_FEDERATED_TOKEN_FILE"),
+			})
+		} else {
+			clientID := os.Getenv("AZURE_CLIENT_ID")
+			managedIdentityID := azidentity.ClientID("") // Default to System Assigned
+
+			if clientID != "" {
+				managedIdentityID = azidentity.ClientID(clientID)
+			}
+
+			cred, credErr = azidentity.NewManagedIdentityCredential(&azidentity.ManagedIdentityCredentialOptions{
+				ID: managedIdentityID,
+			})
+		}
+		if credErr != nil {
+			return nil, credErr
+		}
+		client, err = service.NewClient("https://"+c.AccessKeyID+".blob."+c.Address+"/", cred, svcOpts)
+	} else {
+		connectionString := ""
+		if !c.IgnoreAzureConnectionString {
+			connectionString = os.Getenv("AZURE_STORAGE_CONNECTION_STRING")
+		}
+		if connectionString == "" {
+			connectionString = "DefaultEndpointsProtocol=https;AccountName=" + c.AccessKeyID +
+				";AccountKey=" + c.SecretAccessKeyID + ";EndpointSuffix=" + c.Address
+		}
+		client, err = service.NewClientFromConnectionString(connectionString, svcOpts)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.BucketName == "" {
+		return nil, merr.WrapErrParameterInvalidMsg("invalid empty bucket name")
+	}
+	if c.SkipBucketCheck {
+		return client, nil
+	}
+	// check valid in first query
+	checkBucketFn := func() error {
+		_, err := client.NewContainerClient(c.BucketName).GetProperties(ctx, &container.GetPropertiesOptions{})
+		if err != nil {
+			switch err := err.(type) {
+			case *azcore.ResponseError:
+				if c.CreateBucket && err.ErrorCode == string(bloberror.ContainerNotFound) {
+					_, createErr := client.NewContainerClient(c.BucketName).Create(ctx, &azblob.CreateContainerOptions{})
+					if createErr != nil {
+						return createErr
+					}
+					return nil
+				}
+			}
+		}
+		return err
+	}
+	err = retry.Do(ctx, checkBucketFn, retry.Attempts(CheckBucketRetryAttempts))
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func NewGcpObjectStorageClient(ctx context.Context, c *Config) (*storage.Client, error) {
+	var err error
+
+	var opts []option.ClientOption
+	var projectId string
+	if c.Address != "" {
+		completeAddress := "http://"
+		if c.UseSSL {
+			completeAddress = "https://"
+		}
+		completeAddress = completeAddress + c.Address + "/storage/v1/"
+		opts = append(opts, option.WithEndpoint(completeAddress))
+	}
+	needTLS := c.UseSSL && c.SslTLSMinVersion != "" && c.SslTLSMinVersion != "default"
+
+	if c.GcpNativeWithoutAuth {
+		opts = append(opts, option.WithoutAuthentication())
+		if needTLS {
+			httpClient, err := newTLSHTTPClient(c.SslTLSMinVersion)
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, option.WithHTTPClient(httpClient))
+		}
+	} else if c.GcpCredentialJSON != "" {
+		creds, err := google.CredentialsFromJSON(ctx, []byte(c.GcpCredentialJSON), storage.ScopeReadWrite)
+		if err != nil {
+			return nil, err
+		}
+		projectId, err = getProjectId(c.GcpCredentialJSON)
+		if err != nil {
+			return nil, err
+		}
+		if needTLS {
+			// WithHTTPClient overrides WithCredentials, so we must wrap the
+			// TLS transport with OAuth2 token injection manually.
+			httpClient, err := newTLSHTTPClient(c.SslTLSMinVersion)
+			if err != nil {
+				return nil, err
+			}
+			httpClient.Transport = &oauth2.Transport{
+				Source: creds.TokenSource,
+				Base:   httpClient.Transport,
+			}
+			opts = append(opts, option.WithHTTPClient(httpClient))
+		} else {
+			opts = append(opts, option.WithCredentials(creds))
+		}
+	} else if c.UseIAM {
+		// IAM mode: use Application Default Credentials (ADC).
+		creds, err := google.FindDefaultCredentials(ctx, storage.ScopeReadWrite)
+		if err != nil {
+			return nil, err
+		}
+		if creds.ProjectID != "" {
+			projectId = creds.ProjectID
+		}
+		if needTLS {
+			httpClient, err := newTLSHTTPClient(c.SslTLSMinVersion)
+			if err != nil {
+				return nil, err
+			}
+			httpClient.Transport = &oauth2.Transport{
+				Source: creds.TokenSource,
+				Base:   httpClient.Transport,
+			}
+			opts = append(opts, option.WithHTTPClient(httpClient))
+		} else {
+			opts = append(opts, option.WithCredentials(creds))
+		}
+	} else {
+		return nil, merr.WrapErrParameterInvalidMsg("gcpnative requires GcpCredentialJSON or UseIAM")
+	}
+
+	client, err := storage.NewClient(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.BucketName == "" {
+		return nil, merr.WrapErrParameterInvalidMsg("invalid empty bucket name")
+	}
+	if c.SkipBucketCheck {
+		return client, nil
+	}
+	// Check bucket validity
+	checkBucketFn := func() error {
+		bucket := client.Bucket(c.BucketName)
+		_, err = bucket.Attrs(ctx)
+		if IsGcsBucketNotExist(err) && c.CreateBucket {
+			mlog.Info(ctx, "gcs bucket does not exist, create bucket.", mlog.String("bucket name", c.BucketName))
+			err = client.Bucket(c.BucketName).Create(ctx, projectId, nil)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+		return err
+	}
+	err = retry.Do(ctx, checkBucketFn, retry.Attempts(CheckBucketRetryAttempts))
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// IsGcsBucketNotExist reports whether err carries storage.ErrBucketNotExist.
+//
+// cloud.google.com/go/storage (>= v1.51) returns not-found as
+// fmt.Errorf("%w: %w", ErrBucketNotExist, apiErr). That wrapper only exposes
+// Unwrap() []error, which errors.Is from cockroachdb/errors v1.9.1 does not
+// traverse, so a plain errors.Is against the sentinel silently returns false.
+func IsGcsBucketNotExist(err error) bool {
+	return isInErrorTree(err, storage.ErrBucketNotExist)
+}
+
+// IsGcsObjectNotExist reports whether err carries storage.ErrObjectNotExist.
+// See IsGcsBucketNotExist for why a plain errors.Is is not enough.
+func IsGcsObjectNotExist(err error) bool {
+	return isInErrorTree(err, storage.ErrObjectNotExist)
+}
+
+// isInErrorTree is errors.Is that also descends into multi-%w wrappers
+// (Unwrap() []error), which cockroachdb/errors v1.9.1 does not follow.
+func isInErrorTree(err, target error) bool {
+	if errors.Is(err, target) {
+		return true
+	}
+	for c := err; c != nil; c = errors.UnwrapOnce(c) {
+		multi, ok := c.(interface{ Unwrap() []error })
+		if !ok {
+			continue
+		}
+		for _, inner := range multi.Unwrap() {
+			if isInErrorTree(inner, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseTLSMinVersion(v string) (uint16, error) {
+	switch v {
+	case "1.0":
+		return tls.VersionTLS10, nil
+	case "1.1":
+		return tls.VersionTLS11, nil
+	case "1.2":
+		return tls.VersionTLS12, nil
+	case "1.3":
+		return tls.VersionTLS13, nil
+	default:
+		return 0, merr.WrapErrParameterInvalidMsg("unsupported TLS version: %s, supported values: default, 1.0, 1.1, 1.2, 1.3", v)
+	}
+}
+
+func newTLSHTTPClient(minVersion string) (*http.Client, error) {
+	minVer, err := parseTLSMinVersion(minVersion)
+	if err != nil {
+		return nil, err
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{}
+	}
+	tr.TLSClientConfig.MinVersion = minVer
+	return &http.Client{Transport: tr}, nil
+}
+
+func getProjectId(gcpCredentialJSON string) (string, error) {
+	if gcpCredentialJSON == "" {
+		return "", merr.WrapErrParameterInvalidMsg("the JSON string is empty")
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(gcpCredentialJSON), &data); err != nil {
+		return "", merr.WrapErrParameterInvalidMsg("failed to parse Google Cloud credentials as JSON")
+	}
+	propertyValue, ok := data["project_id"]
+	projectId := fmt.Sprintf("%v", propertyValue)
+	if !ok {
+		return "", merr.WrapErrParameterInvalidMsg("projectId doesn't exist")
+	}
+	return projectId, nil
+}

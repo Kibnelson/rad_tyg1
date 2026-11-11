@@ -1,0 +1,69 @@
+name: Publish Python 🐍 distributions 📦 to TestPyPI
+
+on:
+  push:
+    branches:
+      - 3.0
+
+jobs:
+  build-n-publish:
+    name: Build and publish Python 🐍 distributions 📦 to TestPyPI
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Check out from Git
+      uses: actions/checkout@v6
+    - name: Get history and tags for SCM versioning
+      run: |
+          git fetch --prune --unshallow
+          git fetch --depth=1 origin +refs/tags/*:refs/tags/*
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.13
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.9.21"
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+    - name: Build a binary wheel and a source tarball
+      run: >-
+        uv
+        build
+        --python 3.13
+        --no-sources
+        --sdist
+        --wheel
+        --out-dir dist/
+        .
+    - name: Check distribution metadata
+      run: >-
+        uv
+        run
+        --frozen
+        --only-group release
+        --python 3.13
+        twine
+        check
+        dist/*
+    - name: Check wheel contents
+      run: >-
+        uv
+        run
+        --frozen
+        --only-group release
+        --python 3.13
+        check-wheel-contents
+        dist/*.whl
+    - name: Publish distribution 📦 to Test PyPI
+      run: >-
+        uv
+        publish
+        --index testpypi
+        --trusted-publishing always
+        dist/*
