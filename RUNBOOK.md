@@ -1,6 +1,6 @@
 # Run Milvus
 
-Use an x86-64 Ubuntu 24.04 VM with sudo, at least four available CPU cores,
+Use an x86-64 Ubuntu 24.04 VM with sudo, at least 30 available logical CPUs,
 64 GB RAM and 100 GB free disk for the build. Large datasets and results need
 more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
 
@@ -20,6 +20,8 @@ python3 scripts/check_machine.py --system milvus
 ```
 
 Run the remaining commands from this directory.
+
+`JOBS` limits compilation only; run commands below use 30 workers.
 
 ## 2. Build Milvus
 
@@ -42,7 +44,7 @@ No download or AWS account is needed for this 320-document test.
 ```bash
 bash scripts/services.sh up
 .venv/bin/python scripts/run.py --input data/sample.jsonl \
-  --output results/sample --threads 4 --batch-size 100 --partition-capacity 1000
+  --output results/sample --threads 30 --batch-size 100 --partition-capacity 1000
 cat results/sample/SUMMARY.json
 ```
 
@@ -60,14 +62,15 @@ file it downloaded:
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 bash scripts/services.sh up
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
-  --output results/fineweb --threads 4 --batch-size 10000 --partition-capacity 1000000
+  --output results/fineweb --threads 30 --batch-size 10000 --partition-capacity 1000000
 cat results/fineweb/SUMMARY.json
 ```
 
 For Common Crawl or the existing S3 datasets, follow [DATASETS.md](DATASETS.md)
 and replace `--input` with the file you downloaded. `--rows` controls how many
 documents to download; `--max-documents 10000` limits a run without shortening
-the documents. Choose no more threads than the VM has available.
+the documents. The runtime uses 30 workers, so at least 30 logical CPUs must
+be available to the process.
 
 Use a new download filename and a new results directory when repeating a test.
 The runner starts fresh and does not resume an interrupted run.

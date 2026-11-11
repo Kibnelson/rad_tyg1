@@ -18,7 +18,7 @@ def arguments():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--threads',type=int,default=28)
+    p.add_argument('--threads',type=int,default=30)
     p.add_argument('--batch-size',type=int,default=10_000)
     p.add_argument('--partition-capacity',type=int,default=1_000_000)
     p.add_argument('--max-documents',type=int)

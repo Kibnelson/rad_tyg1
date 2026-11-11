@@ -3,7 +3,7 @@
 set -euo pipefail
 RADV2_SERVER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RADV2_SERVER_CONFIG="${1:-$RADV2_SERVER_ROOT/runs/milvus-physical-1m/config}"
-RADV2_SERVER_THREADS="${2:-28}"
+RADV2_SERVER_THREADS="${2:-30}"
 RADV2_INSTANCE_SLOT="${3:-}"
 RADV2_EXPLICIT_CPUS="${4:-}"
 case "$RADV2_SERVER_THREADS" in ''|*[!0-9]*|0) printf '%s\n' 'Use a positive CPU budget.' >&2; exit 1 ;; esac

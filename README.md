@@ -55,3 +55,6 @@ timings, use the same timer scope, thread count, batch size and partition size.
 See [PROVENANCE.md](PROVENANCE.md) for source versions and licenses.
 
 [Machine sizes and CPU check](MACHINE_SPECS.md) cover the sample and larger runs.
+
+Run commands and the runner default use **30 worker threads**. Use a VM with
+at least 30 available logical CPUs (32 vCPUs recommended).
