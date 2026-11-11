@@ -1,8 +1,13 @@
 # RAD and streaming deduplication baselines
 
-Start with one system below. Its runbook takes you from installing the tools
-to running a small test, then downloading and processing more documents.
-Each system has its own branch and clone folder, so you can try several systems.
+This repository lets you test RAD and three comparison systems for removing
+near-duplicate text from a document stream. Each system checks incoming
+documents, drops likely duplicates and keeps the rest.
+
+Start with one system below. Open its runbook and use its clone command to get
+the correct branch in a separate folder. You can read the runbook without
+cloning `main` first. The steps cover installation, the included sample, then
+downloading and processing more documents.
 Run commands use **30 worker threads** on a VM with at least **30 available
 logical CPUs**; a 32-vCPU VM is recommended.
 

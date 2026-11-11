@@ -1,7 +1,10 @@
 # Installation checks
 
 These are functional checks on the included 320-row fixture, not benchmark
-throughput or recall results. Builds used Linux x86-64 and Python 3.10.
+throughput or recall results. Earlier native sample checks used **four workers**
+on a Linux x86-64 host with 16 available CPUs and Python 3.10. The current
+runbooks request **30 workers**; those earlier checks are not 30-worker
+performance measurements.
 
 | Branch | Checks completed |
 |---|---|
