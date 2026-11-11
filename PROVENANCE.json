@@ -1,0 +1,14 @@
+{
+  "system": "simd_dpk",
+  "source_revision": "faada9ad388b5c0f1c5e4d13052a2a1ebab247b0",
+  "native_faiss_revision": null,
+  "copied_source_sha256": {
+    "engine/encoding.py": "426044292a9de09ff3e6f081915a347daf33840478836e4976395fd6690bf5dc",
+    "engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "vendor/simd/simd_fuzzy_deduplicationv7_unsorted_multi7A_V1.cpp": "4f4d03bfde2a99f6a334dbc6a3f87fcc74e30c61032109c3699d94999e24ab6d",
+    "vendor/simd/MurmurHash3.cpp": "a5b0b806e2f71964023b814a369468dc14b1783ed65928fd6f0555b43b3381d2",
+    "vendor/simd/simd_full_reference_v1.cpp": "bff160268069ca0ea3928c9c4fb065641e4fec6172878798a36aa62499baa12b",
+    "vendor/simd/MurmurHash3.h": "9af2003e3885c841fa0ac08cb5d5f31541ee9d793f8a9c4a4f771f43fb0d6f41"
+  },
+  "scope": "Unchanged encoding/native engines with a new portable streaming entry point; not the original prepared-data benchmark harness."
+}
