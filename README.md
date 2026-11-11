@@ -30,4 +30,6 @@ They do not use the synthetic microbenchmark's 900K-corpus/100K-query split.
 Run outputs record the selected parameters and measured counters/timings.
 The included fixture validates installation and stream processing; it does not
 reproduce the paper's large-run throughput or establish recall on real data.
+[Installation checks and remaining validation](VALIDATION.md) are recorded
+separately from the run instructions.
 [Source and data notices](NOTICE.md) retain upstream attribution.
