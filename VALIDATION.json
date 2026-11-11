@@ -1,0 +1,53 @@
+{
+  "kind": "public_rad_native_install_smoke_validation_v1",
+  "purpose": "Functional installation and checkpoint tests only; not benchmark quality or performance results.",
+  "platform": "Linux x86-64",
+  "python": "3.10.22",
+  "numpy": "1.26.4",
+  "faiss": "1.15.1",
+  "fresh_vendored_native_build": true,
+  "distance_mode_tested": "cache_scalar",
+  "cache_simd_executed": false,
+  "cache_simd_scope": "Current validation CPU lacks AVX-512 VPOPCNTDQ. Unsupported cache_simd is refused; no hidden fallback is used.",
+  "included_fixture_sha256": "e21cb1c105592c5eb55f8f3e246a2dff786816adbc7f625aac7e14e7bbad4bbb",
+  "native_bitmap_python_parity_rows": 32,
+  "included_fixture_counts": {
+    "screened": 320,
+    "inserted": 216,
+    "index_search_drops": 98,
+    "in_batch_dedup_drops": 6,
+    "partition_counts": [
+      216
+    ]
+  },
+  "rollover_and_reload_counts": {
+    "screened": 320,
+    "inserted": 216,
+    "index_search_drops": 98,
+    "in_batch_dedup_drops": 6,
+    "partition_counts": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32,
+      24
+    ]
+  },
+  "s3_excerpt_fixture_counts": {
+    "screened": 16,
+    "inserted": 16,
+    "index_search_drops": 0,
+    "in_batch_dedup_drops": 0,
+    "partition_counts": [
+      8,
+      8
+    ]
+  },
+  "raw_evidence_and_counts_reconciled": true,
+  "additive_stage_timings_reconciled": true,
+  "complete_checkpoint_reload_passed": true,
+  "bounded_prefix_continuation_passed": true,
+  "changed_configuration_resume_refused": true
+}

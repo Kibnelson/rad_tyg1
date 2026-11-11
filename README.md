@@ -1,33 +1,30 @@
-# RAD and streaming deduplication baselines
+# RAD
 
-Choose one system branch. Each branch has its own setup, a small included
-fixture, a streaming runner and a short runbook.
+Streaming MinHash-bitmap HNSW with sequential 1M-retained-document partitions
+and per-partition Bloom routing. This branch includes its modified native
+Faiss and in-batch SIMD sources; it does not fetch a private repository.
 
-| System | Branch | Instructions |
-|---|---|---|
-| RAD: bitmap HNSW with Bloom routing | [rad](https://github.com/Kibnelson/rad_tyg1/tree/rad) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/rad/RUNBOOK.md) |
-| Milvus: native MinHash-LSH | [milvus](https://github.com/Kibnelson/rad_tyg1/tree/milvus) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md) |
-| SIMD-DPK: full-reference baseline | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/tree/simd_dpk) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/RUNBOOK.md) |
-| Faiss(Jaccard): raw MinHash HNSW | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/tree/faiss_jaccard) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/RUNBOOK.md) |
+## Test the included data
 
-Start with the included data; no AWS account is needed for that test:
+Linux x86-64, AVX2 + POPCNT, Python 3.10–3.12:
 
 ```bash
-git clone --branch rad --single-branch https://github.com/Kibnelson/rad_tyg1.git
+git clone --single-branch --branch rad https://github.com/Kibnelson/rad_tyg1.git
 cd rad_tyg1
-# Follow RUNBOOK.md for setup and the sample command.
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build swig libopenblas-dev python3-dev python3-venv
+bash scripts/setup.sh
+.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
+  --threads 4 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar
+cat results/sample/summary.json
+bash scripts/smoke_test.sh
 ```
 
-The examples target Linux x86-64 and Python 3.10–3.12. Native CPU/build
-requirements differ by system; check the chosen branch before installing.
-Milvus builds the modified server and SDK, not an interchangeable stock image.
+The sample command uses the scalar distance kernel so it also runs on AVX2-only
+CPUs. `cache_simd` is the benchmark kernel and requires AVX-512 VPOPCNTDQ.
+The selected kernel is recorded; do not compare their timings as identical builds.
 
-[DATASETS.md](DATASETS.md) explains the included S3-derived fixture, the four
-existing S3 dataset prefixes, and public Common Crawl/FineWeb downloads.
-Real-data runs screen every document in batches, starting from an empty index.
-They do not use the synthetic microbenchmark's 900K-corpus/100K-query split.
+See [RUNBOOK.md](RUNBOOK.md) for downloaded inputs, a larger run and resume.
+See [DATASETS.md](DATASETS.md) for the fixture's provenance and larger inputs.
 
-Run outputs record the selected parameters and measured counters/timings.
-The included fixture validates installation and stream processing; it does not
-reproduce the paper's large-run throughput or establish recall on real data.
-[Source and data notices](NOTICE.md) retain upstream attribution.
+Functional installation checks: [VALIDATION.json](VALIDATION.json).

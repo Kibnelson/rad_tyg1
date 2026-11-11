@@ -1,0 +1,8 @@
+numpy==1.26.4
+mmh3==5.3.1
+pybind11==3.1.0
+scikit-build-core==0.12.2
+swig==4.5.1
+packaging==26.3
+setuptools==79.0.1
+wheel==0.48.0
