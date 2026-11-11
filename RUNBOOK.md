@@ -1,40 +1,68 @@
 # Test and run
 
-Use Linux x86-64 with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT
-and BMI2 (for example, Intel Skylake Xeon or newer), Python **3.10–3.12**,
-CMake ≥3.24, Ninja and a C++20 compiler. Setup builds the vendored modified
-Faiss; installing the ordinary `faiss-cpu` wheel is insufficient.
+These commands target **Ubuntu 24.04 with Python 3.12**. Use Linux x86-64
+with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT and BMI2. Python
+3.10–3.12, CMake ≥3.24, Ninja and a C++20 compiler are supported.
+
+See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
+
+## 1. Install and build
 
 ```bash
-git clone --single-branch --branch faiss_jaccard https://github.com/Kibnelson/rad_tyg1.git
-cd rad_tyg1
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-dev g++ cmake ninja-build libopenblas-dev
-bash setup.sh
+sudo apt-get install -y git tmux python3.12 python3.12-venv python3.12-dev g++ cmake ninja-build libopenblas-dev
+git clone --single-branch --branch faiss_jaccard https://github.com/Kibnelson/rad_tyg1.git rad_tyg1-faiss_jaccard
+cd rad_tyg1-faiss_jaccard
+python3 scripts/check_machine.py --system faiss_jaccard
+PYTHON=python3.12 JOBS=4 bash setup.sh
+```
+
+Setup builds the included modified Faiss and checks native distance, identity
+search and save/reload. The ordinary `faiss-cpu` package cannot run this engine.
+
+## 2. Test the included data
+
+No download or AWS account is needed:
+
+```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
   --threads 4 --batch-size 100 --partition-capacity 1000
 cat results/sample/summary.json
 ```
 
-For a selected interpreter/build size: `PYTHON=python3.12 JOBS=4 bash setup.sh`.
-Setup checks the actual native distance, identity search and save/reload.
+On success, `screened` is **320** and `inserted` + `index_search_drops` +
+`in_batch_dedup_drops` totals 320. Individual counts can vary because HNSW is
+approximate. These are installation checks, not benchmark scores. Use fewer
+threads if your VM has fewer than four available CPUs.
 
-Download more data using [DATASETS.md](DATASETS.md), then run, for example:
+## 3. Download and test more data
+
+This downloads 100,000 full FineWeb documents, keeping their order:
 
 ```bash
-.venv/bin/python scripts/run.py --input data/cc_main_download.jsonl \
-  --output results/cc_main --threads 28 --batch-size 10000 \
-  --partition-capacity 30000000
+.venv/bin/python -m pip install -r requirements-data.txt
+.venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
+.venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
+  --output results/fineweb --threads 4 --batch-size 10000 --partition-capacity 100000
+cat results/fineweb/summary.json
 ```
 
-Here `--partition-capacity` is a retained-vector ceiling for **one graph**.
-Choose a ceiling and VM memory large enough for the input; the baseline does
-not create RAD partitions. Tune `--M`, `--ef-construction`, `--ef-search`,
-`--top-k` and `--cutoff` explicitly when comparing configurations.
+`--rows` is the number of documents to download. `--partition-capacity` limits
+documents kept in **one graph**; it does not create RAD partitions. Increase
+this ceiling, and allow enough memory, when downloading more documents. For S3
+or Common Crawl, follow [DATASETS.md](DATASETS.md) and replace `--input` with
+the downloaded file's path. Use new download filenames and output directories
+when repeating a test. Input documents keep their full text.
 
-Output must be a new directory; this compact driver starts fresh and does not
-resume runs. For long runs, use `tmux new -As faiss-jaccard` and launch inside it.
+## 4. Run longer jobs
+
+Use `tmux new -As faiss-jaccard`, then run the command inside it. `nproc` shows
+your VM's available CPUs; keep `--threads` within that count. Each run starts
+fresh and cannot resume. Tune `--M`, `--ef-construction`, `--ef-search`, `--top-k` and
+`--cutoff` explicitly for another configuration.
+
 Processing QPS includes input, encoding, in-batch filtering, search, decisions
-and insertion; evidence/final graph writes are outside that timer. Distance
-≤30 is a raw-MinHash estimate and does not guarantee exact Jaccard ≥0.70.
-Top-k evidence grows with screened rows × top-k; allow disk space for long runs.
+and insertion. Evidence and final graph writes are outside this timer.
+Distance ≤30 compares MinHash signatures; it does not guarantee exact Jaccard
+≥0.70. By default, the runner saves all ordered top40 candidates before
+admission, so allow disk space as the number of documents grows.
