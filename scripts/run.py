@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -16,12 +17,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--threads', type=int, default=28)
+    parser.add_argument('--threads', type=int, default=30)
     parser.add_argument('--batch-size', type=int, default=10000)
     parser.add_argument('--max-documents', type=int)
     parser.add_argument('--partition-capacity', type=int, default=1000000,
                         help='Accepted for the shared CLI; this baseline has one complete retained reference.')
     args = parser.parse_args()
+    if args.threads > len(os.sched_getaffinity(0)):
+        parser.error('--threads exceeds available logical CPUs')
     if min(args.threads, args.batch_size, args.partition_capacity) < 1 or (args.max_documents is not None and args.max_documents < 1):
         parser.error('Counts must be positive')
     if args.output.exists():

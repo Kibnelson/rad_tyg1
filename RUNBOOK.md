@@ -24,13 +24,13 @@ No download or AWS account is needed:
 
 ```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 4 --batch-size 100
+  --threads 30 --batch-size 100
 cat results/sample/summary.json
 ```
 
 On success, `screened` is **320** and `inserted` + `index_search_drops` +
 `in_batch_dedup_drops` totals 320. These are installation checks, not benchmark
-scores. Use fewer threads if your VM has fewer than four available CPUs.
+scores. Use a VM with at least 30 available logical CPUs for these commands.
 
 ## 3. Download and test more data
 
@@ -40,7 +40,7 @@ This downloads 100,000 full FineWeb documents, keeping their order:
 .venv/bin/python -m pip install -r requirements-data.txt
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
-  --output results/fineweb --threads 4 --batch-size 10000
+  --output results/fineweb --threads 30 --batch-size 10000
 cat results/fineweb/summary.json
 ```
 
@@ -52,7 +52,7 @@ Input documents keep their full text; all are checked before insertion.
 ## 4. Run longer jobs
 
 Use `tmux new -As simd-dpk`, then run the command inside it. `nproc` shows your
-VM's available CPUs; keep `--threads` within that count. Each run starts fresh
+VM's available CPUs; these commands require at least 30. Each run starts fresh
 and cannot resume.
 The reference grows on disk; allow space for retained signatures and a temporary
 uint64 reference file. Large runs can be slow.

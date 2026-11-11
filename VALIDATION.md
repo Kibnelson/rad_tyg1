@@ -1,5 +1,9 @@
 # Local native validation
 
+The commands below record earlier checks. Current runbook commands use 30
+worker threads; these earlier tests used four.
+
+
 Fresh `setup.sh` completed with Python 3.10.22 on Linux x86-64. It compiled both
 vendored SIMD modules and checked duplicate detection with the actual native
 library; no substitute engine was used.
