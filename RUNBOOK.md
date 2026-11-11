@@ -1,57 +1,66 @@
-# Run RAD on another input
+# Run RAD
 
-Complete the README setup first. Inputs are JSONL records with `text` and an
-optional original `id`; input order and full text are preserved. Download a
-bounded prefix from the prepared S3 data (requires normal AWS read access):
+These steps use Ubuntu 24.04, Python 3.12 and an x86-64 CPU with **AVX2 and
+POPCNT**. Run the commands in order. The examples use four worker threads;
+use fewer if your VM has fewer available CPUs.
+
+See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
+
+## 1. Install and build
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git tmux build-essential cmake ninja-build libopenblas-dev python3.12 python3.12-dev python3.12-venv
+git clone --single-branch --branch rad https://github.com/Kibnelson/rad_tyg1.git rad_tyg1-rad
+cd rad_tyg1-rad
+python3 scripts/check_machine.py --system rad --distance-mode cache_scalar
+PYTHON=python3.12 JOBS=4 bash scripts/setup.sh
+```
+
+Setup builds the native code included in this branch. It needs internet access
+for build dependencies. Python 3.10–3.12 is supported; for another version,
+install its matching development/venv packages and change `PYTHON` above.
+
+## 2. Test the included sample
+
+```bash
+.venv/bin/python scripts/check_fixture.py
+.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
+  --threads 4 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar
+cat results/sample/summary.json
+```
+
+The summary should show `status: completed` and `screened: 320`.
+`inserted`, `index_search_drops` and `in_batch_dedup_drops` should add up to 320.
+The sample is already in Git; no download or AWS access is needed.
+For an additional partition rollover and restart check, run
+`bash scripts/smoke_test.sh`; it should print `NATIVE RAD SMOKE PASSED`.
+
+## 3. Download and run more data
+
+This example downloads 100,000 FineWeb documents and runs the same scalar
+kernel as the sample. Stay in the cloned folder:
 
 ```bash
 .venv/bin/python -m pip install -r requirements-data.txt
-.venv/bin/python scripts/get_data.py s3 --dataset cc_main --rows 10000 --output data/cc_main.jsonl
+.venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
+.venv/bin/python scripts/run.py --input data/fineweb_download.jsonl --output results/fineweb \
+  --threads 4 --batch-size 10000 --distance-mode cache_scalar
+cat results/fineweb/summary.json
 ```
 
-Without AWS credentials, use public FineWeb or Common Crawl instead:
+[DATASETS.md](DATASETS.md) shows Common Crawl and the existing S3 datasets.
+Replace `--input` with the file you downloaded. Increase `--rows` for more
+documents and choose new download/result paths. `--max-documents 10000` limits
+a run to its first 10,000 documents. Text is kept in full.
 
-```bash
-.venv/bin/python scripts/get_data.py fineweb --rows 10000 --output data/fineweb.jsonl
-.venv/bin/python scripts/get_data.py common-crawl --crawl CC-MAIN-2024-10 --rows 10000 --output data/common_crawl.jsonl
-```
+All index partitions stay in RAM, so larger inputs need more memory and disk.
+On a suitable VM, you can raise `--threads`; the optional `cache_simd` kernel
+requires AVX-512 VPOPCNTDQ. See [README.md](README.md) for settings and result files.
 
-Then run on the selected JSONL file:
+## 4. Repeat or resume
 
-```bash
-.venv/bin/python scripts/run.py --input data/cc_main.jsonl --output results/cc_main \
-  --threads 28 --distance-mode cache_simd
-```
-
-Defaults: **M96, corpus/query efConstruction96, efSearch100, top-k4, bitmap
-cutoff D≤50, 10K batches and 1M retained documents per partition**. This is the
-lower-search-budget Common Crawl profile. The earlier profile is available
-with `--ef-construction 128 --ef-search 150 --top-k 40`. Other useful options:
-`--max-documents 100000`, `--threads 4`, and `--distance-mode cache_scalar`.
-D≤50 is a bitmap rule; it is not an exact Jaccard≥0.70 guarantee.
-
-## What the runner does
-
-Every document is screened. It computes 112-value MinHash, applies the native
-in-batch deduplicator, and converts survivors to bitmaps. Bloom routing uses
-37 position-tagged groups of three MinHash values. The main search visits
-selected partitions sequentially and merges top-k results before D≤50 admission.
-Zero-route queries are admitted. Accepted documents are appended only after
-the batch's search, updating the active graph and its Bloom filter. Full
-partitions remain searchable and all partitions remain in memory.
-
-## Results and restart
-
-`summary.json` contains counts, parameters and pooled processing throughput;
-`batches.csv` has additive per-batch timings and routing visits; each
-`evidence/batch_*_metadata.json` retains native per-partition search diagnostics. Ordered native
-candidates and decisions are in `evidence/batch_*.jsonl`; changing `--top-k 40`
-preserves all returned top40 candidates for offline first4 analysis. IDs in the index are zero-based
-input ordinals; each observation also retains `source_id`. Recall is not measured.
-Evidence/checkpoint/report writes are outside reported processing throughput;
-setup/download/build time is not query time. This public runner makes no
-separate warmup searches and does not claim to reproduce prior figure QPS.
-
-To continue after Ctrl+C, repeat the same command with `--resume`. It reloads
-the last committed graph/Bloom checkpoint and checks the input hash and run
-configuration. Use a new output directory to change any graph or batch setting.
+Use a new `--output` folder for a separate run. To continue after Ctrl+C, repeat
+the same command with `--resume`; RAD checks the input hash and settings before
+loading its last saved checkpoint. Changed graph/batch settings need a new run.
+For a long job, start `tmux new -As rad` before launching the run.
