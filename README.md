@@ -19,9 +19,9 @@ D≤50, 10K-document batches and 1M kept documents per partition**. Routing uses
 37 position-tagged groups of three MinHash values. Queries routed to no partition
 are inserted. D≤50 is an approximate bitmap rule, not an exact Jaccard≥0.70 test.
 
-The runbook uses `cache_scalar`, which needs AVX2 and POPCNT. The benchmark
-kernel `cache_simd` additionally requires AVX-512 VPOPCNTDQ; select it explicitly
-only on a compatible CPU. The chosen kernel is recorded in the results.
+The runbook passes `--distance-mode cache_scalar`, which needs AVX2 and POPCNT.
+The runner defaults to `cache_simd` if that option is omitted; this kernel
+additionally requires AVX-512 VPOPCNTDQ. The chosen kernel is recorded in the results.
 The earlier graph profile is available with
 `--ef-construction 128 --ef-search 150 --top-k 40`.
 

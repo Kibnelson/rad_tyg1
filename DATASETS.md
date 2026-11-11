@@ -67,6 +67,10 @@ count and SHA256 file hash. Keep this beside the input when sharing results.
 Existing downloads are not overwritten; choose a new path for another download.
 Run results also need a new output folder, except when using RAD's explicit resume.
 
+To compare systems, download the data once and pass that same file to every
+runner. An absolute path works from each system's clone folder. Keep its
+provenance file too, so the document count and file hash can be checked.
+
 To use your own data, JSONL means **one JSON object per line**. Each object needs
 `text`; `id` is optional:
 
