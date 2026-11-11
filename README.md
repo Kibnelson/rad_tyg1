@@ -1,33 +1,26 @@
-# RAD and streaming deduplication baselines
+# Faiss(Jaccard): raw-MinHash HNSW
 
-Choose one system branch. Each branch has its own setup, a small included
-fixture, a streaming runner and a short runbook.
+This branch runs the MH Jaccard engine: 112 uint32 MinHash values are stored as
+448 big-endian bytes, and the modified native Faiss metric compares matching
+signature positions. It is **not** RAD's occupancy-bitmap distance.
 
-| System | Branch | Instructions |
-|---|---|---|
-| RAD: bitmap HNSW with Bloom routing | [rad](https://github.com/Kibnelson/rad_tyg1/tree/rad) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/rad/RUNBOOK.md) |
-| Milvus: native MinHash-LSH | [milvus](https://github.com/Kibnelson/rad_tyg1/tree/milvus) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md) |
-| SIMD-DPK: full-reference baseline | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/tree/simd_dpk) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/RUNBOOK.md) |
-| Faiss(Jaccard): raw MinHash HNSW | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/tree/faiss_jaccard) | [Runbook](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/RUNBOOK.md) |
+Defaults match the completed middle-budget MH profile: **M96, corpus/query
+efConstruction384, efSearch400, top40 and distance cutoff30**. A single graph
+grows from empty. Each full-text batch is filtered in-batch, searched, and then
+accepted documents are inserted. There is no Bloom routing.
 
-Start with the included data; no AWS account is needed for that test:
+Start with the [runbook](RUNBOOK.md). The included fixture tests the engine;
+it is not paper-quality throughput or recall evidence.
+See [DATASETS.md](DATASETS.md) for S3 inputs and public Common Crawl/FineWeb.
 
-```bash
-git clone --branch rad --single-branch https://github.com/Kibnelson/rad_tyg1.git
-cd rad_tyg1
-# Follow RUNBOOK.md for setup and the sample command.
-```
+Outputs include `summary.json`, per-batch timing/counts, accepted IDs, the final
+native graph and **all ordered top40 results before admission** in `topk.jsonl`.
+These permit offline first4-versus-all40 inspection of the same search result;
+they do not simulate an independent top-k4 search. Real-data recall and exact
+literal-text Jaccard are not measured.
 
-The examples target Linux x86-64 and Python 3.10–3.12. Native CPU/build
-requirements differ by system; check the chosen branch before installing.
-Milvus builds the modified server and SDK, not an interchangeable stock image.
+[PROVENANCE.json](PROVENANCE.json) binds the unchanged native engine and encoder.
+This new portable all-row driver does not reproduce the earlier prepared
+900K-corpus/100K-query workload or its numerical results.
 
-[DATASETS.md](DATASETS.md) explains the included S3-derived fixture, the four
-existing S3 dataset prefixes, and public Common Crawl/FineWeb downloads.
-Real-data runs screen every document in batches, starting from an empty index.
-They do not use the synthetic microbenchmark's 900K-corpus/100K-query split.
-
-Run outputs record the selected parameters and measured counters/timings.
-The included fixture validates installation and stream processing; it does not
-reproduce the paper's large-run throughput or establish recall on real data.
-[Source and data notices](NOTICE.md) retain upstream attribution.
+Functional installation checks: [VALIDATION.md](VALIDATION.md).

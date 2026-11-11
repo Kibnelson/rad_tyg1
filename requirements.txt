@@ -1,0 +1,6 @@
+numpy==1.26.4
+mmh3==5.3.1
+pybind11==3.1.0
+scikit-build-core==1.1.1
+packaging==26.3
+swig>=4.2,<5
