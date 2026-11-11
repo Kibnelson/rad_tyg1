@@ -1,33 +1,84 @@
-# Run Milvus afresh
+# Run Milvus
 
-Use an x86-64 Ubuntu VM with sudo and AVX-512F/DQ/VL/BW, AVX2 and POPCNT. Ubuntu 24.04 with Python 3.12 is the reference environment. Setup installs the selected Python interpreter, matching venv/development packages, and Docker Engine with Compose when absent. An existing Docker installation must provide Compose. Python 3.10–3.12 is supported; other Ubuntu releases need the selected version's packages available in their configured apt repositories. Allow at least 64 GB RAM and 100 GB free disk for the native build; the 30M datasets/results need additional disk. Build dependencies download from public upstream services.
+Use an x86-64 Ubuntu 24.04 VM with sudo, at least four available CPU cores,
+64 GB RAM and 100 GB free disk for the build. Large datasets and results need
+more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
+
+**The full native server and sample-run test is still pending.** Check
+[VALIDATION.md](VALIDATION.md) before treating this package as fully verified.
+
+See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
+
+## 1. Get the code
 
 ```bash
-git clone --branch milvus --single-branch https://github.com/Kibnelson/rad_tyg1.git
-cd rad_tyg1
+sudo apt-get update
+sudo apt-get install -y git tmux python3.12
+git clone --branch milvus --single-branch https://github.com/Kibnelson/rad_tyg1.git rad_tyg1-milvus
+cd rad_tyg1-milvus
+python3 scripts/check_machine.py --system milvus
+```
+
+Run the remaining commands from this directory.
+
+## 2. Build Milvus
+
+On a remote VM, start a session with `tmux new -As milvus-public`, then run the
+build inside it. The first build downloads many dependencies and can take hours.
+
+```bash
 PYTHON_BIN=python3.12 JOBS=2 bash scripts/setup.sh
+```
+
+Setup installs Python 3.12 and its build packages, the Python client, and Docker
+with Compose if Docker is absent. An existing Docker installation must provide
+Compose. Python 3.10–3.12 can be selected with `PYTHON_BIN` when its packages are
+available on the VM. `JOBS=2` limits parallel compilation.
+
+## 3. Run the included sample
+
+No download or AWS account is needed for this 320-document test.
+
+```bash
 bash scripts/services.sh up
 .venv/bin/python scripts/run.py --input data/sample.jsonl \
   --output results/sample --threads 4 --batch-size 100 --partition-capacity 1000
+cat results/sample/SUMMARY.json
 ```
 
-Use a fresh output directory for each run. The runner starts and stops only its own native server processes; etcd/MinIO remain running until:
+A successful run reports `status: completed` and `screened: 320`. The inserted,
+index-search drop and in-batch drop counts must add up to 320. See
+[README.md](README.md#results-and-timing) for the output files and timing scope.
+
+## 4. Download and run more data
+
+This example downloads 100,000 full-text FineWeb documents, then processes the
+file it downloaded:
+
+```bash
+.venv/bin/python -m pip install -r requirements-data.txt
+.venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
+bash scripts/services.sh up
+.venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
+  --output results/fineweb --threads 4 --batch-size 10000 --partition-capacity 1000000
+cat results/fineweb/SUMMARY.json
+```
+
+For Common Crawl or the existing S3 datasets, follow [DATASETS.md](DATASETS.md)
+and replace `--input` with the file you downloaded. `--rows` controls how many
+documents to download; `--max-documents 10000` limits a run without shortening
+the documents. Choose no more threads than the VM has available.
+
+Use a new download filename and a new results directory when repeating a test.
+The runner starts fresh and does not resume an interrupted run.
+
+## 5. Stop the supporting services
+
+The runner stops its own Milvus processes. After all tests, stop etcd and MinIO:
 
 ```bash
 bash scripts/services.sh down
 ```
 
-For a larger full-text stream, first download input following [DATASETS.md](DATASETS.md), then:
-
-```bash
-.venv/bin/python scripts/run.py --input data/cc_main_download.jsonl \
-  --output results/cc_main --threads 28 --batch-size 10000 --partition-capacity 1000000
-```
-
-Choose no more threads than the VM's available CPU affinity. `--max-documents 10000` limits a trial without truncating individual documents. Each batch is MinHash encoded, deduplicated in batch, searched against existing partitions, and its unmatched documents are appended. Full partitions are sealed; the final partial partition is sealed at run completion. This small public driver starts a new run; the original VM recovery/publication workflow is not exposed here.
-
-The local profile permits native index building from one retained row, so the tiny fixture's final segment can be indexed. This lowers Milvus's default 1,024-row index-building threshold; it leaves the 14×8 LSH settings and retained partition capacity unchanged.
-
-`batches.csv` records counts, stage times and `screened / processing_seconds`; `SUMMARY.json` reports pooled throughput and full local wall time. Processing includes MinHash, in-batch deduplication, native search, admission, and append/readiness. Creating native owners during append is included in insert time. Input iteration, raw-result writes, store-context setup, final partial-partition sealing and shutdown are outside that processing timer and inside full wall time. Build/download time is outside both. `raw/batch_*.jsonl` preserves ordered top4 candidates outside the processing timer. Stream IDs are zero-based input positions; source IDs are also retained. No raw input text is copied to the result JSONL.
-
-Before sharing a timing result, use the same timer scope, thread budget, batch size and partition capacity. The tiny Git input validates the execution path; it is not a performance experiment.
+This keeps their local data. Run `bash scripts/services.sh up` before the next
+test.
