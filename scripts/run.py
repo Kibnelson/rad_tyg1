@@ -77,7 +77,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--input', type=Path, required=True)
     ap.add_argument('--output', type=Path, required=True)
-    ap.add_argument('--threads', type=int, default=28)
+    ap.add_argument('--threads', type=int, default=30)
     ap.add_argument('--batch-size', type=int, default=10000)
     ap.add_argument('--partition-capacity', type=int, default=1000000)
     ap.add_argument('--max-documents', type=int)
@@ -89,6 +89,8 @@ def main():
     ap.add_argument('--distance-mode', choices=('cache_simd', 'cache_scalar'), default='cache_simd')
     ap.add_argument('--resume', action='store_true')
     args = ap.parse_args()
+    if args.threads > len(os.sched_getaffinity(0)):
+        ap.error('--threads exceeds available logical CPUs')
     if min(args.threads, args.batch_size, args.partition_capacity, args.ef_construction, args.ef_search, args.top_k) < 1 or args.M < 2:
         ap.error('Counts and graph budgets must be positive, with M >= 2')
     if args.max_documents is not None and args.max_documents < 1:

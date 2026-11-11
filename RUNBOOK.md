@@ -1,8 +1,8 @@
 # Run RAD
 
 These steps use Ubuntu 24.04, Python 3.12 and an x86-64 CPU with **AVX2 and
-POPCNT**. Run the commands in order. The examples use four worker threads;
-use fewer if your VM has fewer available CPUs.
+POPCNT**. Run the commands in order. The examples use **30 worker threads**;
+your VM must expose at least 30 available logical CPUs.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
@@ -21,12 +21,14 @@ Setup builds the native code included in this branch. It needs internet access
 for build dependencies. Python 3.10–3.12 is supported; for another version,
 install its matching development/venv packages and change `PYTHON` above.
 
+`JOBS` limits compilation only; run commands below use 30 workers.
+
 ## 2. Test the included sample
 
 ```bash
 .venv/bin/python scripts/check_fixture.py
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 4 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar
+  --threads 30 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar
 cat results/sample/summary.json
 ```
 
@@ -45,7 +47,7 @@ kernel as the sample. Stay in the cloned folder:
 .venv/bin/python -m pip install -r requirements-data.txt
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl --output results/fineweb \
-  --threads 4 --batch-size 10000 --distance-mode cache_scalar
+  --threads 30 --batch-size 10000 --distance-mode cache_scalar
 cat results/fineweb/summary.json
 ```
 
@@ -55,7 +57,7 @@ documents and choose new download/result paths. `--max-documents 10000` limits
 a run to its first 10,000 documents. Text is kept in full.
 
 All index partitions stay in RAM, so larger inputs need more memory and disk.
-On a suitable VM, you can raise `--threads`; the optional `cache_simd` kernel
+The runtime uses 30 workers. The optional `cache_simd` kernel
 requires AVX-512 VPOPCNTDQ. See [README.md](README.md) for settings and result files.
 
 ## 4. Repeat or resume

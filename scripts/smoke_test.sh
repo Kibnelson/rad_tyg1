@@ -4,9 +4,9 @@ cd "$(dirname "$0")/.."
 RAD_SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rad-native-smoke.XXXXXXXX")"
 RAD_SMOKE_MODE="${RAD_DISTANCE_MODE:-cache_scalar}"
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output "$RAD_SMOKE_DIR/run" \
-  --threads 2 --batch-size 100 --partition-capacity 32 --distance-mode "$RAD_SMOKE_MODE"
+  --threads 30 --batch-size 100 --partition-capacity 32 --distance-mode "$RAD_SMOKE_MODE"
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output "$RAD_SMOKE_DIR/run" \
-  --threads 2 --batch-size 100 --partition-capacity 32 --distance-mode "$RAD_SMOKE_MODE" --resume
+  --threads 30 --batch-size 100 --partition-capacity 32 --distance-mode "$RAD_SMOKE_MODE" --resume
 .venv/bin/python - "$RAD_SMOKE_DIR/run" <<'PY'
 import json, sys
 from pathlib import Path

@@ -44,3 +44,6 @@ checks, not the earlier paper results; real-data recall is not measured.
 record what was checked and where the code came from.
 
 [Machine sizes and CPU check](MACHINE_SPECS.md) cover the sample and larger runs.
+
+Run commands and the runner default use **30 worker threads**. Use a VM with
+at least 30 available logical CPUs (32 vCPUs recommended).
