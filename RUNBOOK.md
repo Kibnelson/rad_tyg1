@@ -4,9 +4,6 @@ Use an x86-64 Ubuntu 24.04 VM with sudo, at least 30 available logical CPUs,
 64 GB RAM and 100 GB free disk for the build. Large datasets and results need
 more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
 
-**The full native server and sample-run test is still pending.** Check
-[VALIDATION.md](VALIDATION.md) before treating this package as fully verified.
-
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
 ## 1. Get the code

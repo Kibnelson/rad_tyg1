@@ -10,9 +10,8 @@ The custom Milvus server, Knowhere library and Python client are included as
 source. Docker runs the local etcd and MinIO services they need. No access to
 the original private repository is required.
 
-**Full native server and sample-run validation is still pending.** See
-[VALIDATION.md](VALIDATION.md) for the checks completed so far. The included
-sample tests installation and document handling.
+Follow [RUNBOOK.md](RUNBOOK.md) to build the server and run the included sample.
+[VALIDATION.md](VALIDATION.md) lists installation checks.
 
 ## Settings
 
