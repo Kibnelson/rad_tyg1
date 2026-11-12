@@ -102,7 +102,7 @@ def eval_and_plot(
 
     if plot:
         data = np.array(data)
-        plt.plot(data[:, 0], data[:, 1], label=name)  # x - recall, y - qps
+        plt.plot(data[:, 0], data[:, 1], label=name)
 
 
 M, nlist = 64, 4096

@@ -4,18 +4,18 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Benchmark the multi-GPU CAGRA -> HNSW build: cuVS all_neighbors builds a knn
-graph over overlapping clusters across all GPUs, cagra::optimize prunes it into
-a single unified graph, and copyTo produces a CPU IndexHNSWCagra.
+""
 
-Measures build/copyTo/serialize wall-clock, index size, and recall@10 vs
-brute-force ground truth at several efSearch values.
 
-Usage:
-  buck run @//mode/opt fbcode//faiss/gpu/test:bench_approaches -- \\
-      --data /path/to/vectors.npy
-"""
+
+
+
+
+
+
+
+
+
 
 import argparse
 import os
@@ -209,7 +209,7 @@ def eval_recall(index, xq, Igt, k=10, ef_values=None):
 
 
 def eval_qps(index, xq, k=10, ef_values=None, repeat=5):
-    """Full-batch throughput at each efSearch, best of `repeat` runs."""
+    ""
     if ef_values is None:
         ef_values = EF_VALUES
     nq = xq.shape[0]

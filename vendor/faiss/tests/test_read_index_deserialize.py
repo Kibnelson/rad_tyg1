@@ -1081,7 +1081,7 @@ class TestReadIndexDeserialize(FaissTestCase):
         push_fourcc(buf, "IHNf")
         push_index_header(buf, 4, ntotal)
         push_hnsw_with_neighbors(buf, ntotal, npn, neighbors)
-        # Flat storage with 4 zero vectors (valid, not useful for recall)
+
         push_minimal_flat(buf, 4, ntotal)
 
         idx = read_index(buf)

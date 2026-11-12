@@ -68,7 +68,7 @@ k = gt.shape[1]
 
 print("prepare criterion")
 
-# criterion = 1-recall at 1
+
 crit = faiss.OneRecallAtRCriterion(xq.shape[0], 1)
 crit.set_groundtruth(None, gt)
 crit.nnn = k

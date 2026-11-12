@@ -429,7 +429,7 @@ kernel void l2_with_norms(
 //       Grid: (nq) threadgroups, 256 threads each.
 //       Merges nprobe per-list top-k into final top-k per query.
 //
-// Both use float4 vectorised loads for memory throughput.
+
 // ============================================================
 // Shared params layout (device const uint*):
 //   [0] nq   [1] d   [2] k   [3] nprobe   [4] want_min

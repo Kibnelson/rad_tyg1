@@ -101,59 +101,6 @@ Added
 - ccecc847db5e1d20e929cf8df4a8ddb654769890 Add ClusteringInitMethod enum constants to __init__.pyi stub (#5324)
 - 55990eb91f9042d811a76d72e43f9ca126d77beb Port test_rabitq_utils from C++ to Python (#5442)
 
-Changed
-- 0236390f2fd8e63ff5e4c6d4ca981b7ba032cd17 Optimize RaBitQ fastscan query setup + 80% qps (#5396)
-- b1d61c3b883fb82063e024979404dd6ebe134eca Fuse RaBitQ AND-dot and popcount scan (#5412)
-- 81031a97892896ca9167e5203e27420de4617e67 RaBitQ fastscan avx512 lut quant (#5397)
-- b7f2b0f1fd8d62e902bdcdcb9ae9694a6fd8f792 RaBitQ SIMD-optimized bit-plane operation (#5392)
-- 0a27700e05429e60221b0eccbf50c4a79ad2e450 Reuse RaBitQ IVF scanner distance computer (#5390)
-- a3d59f0999c69015eeff54fdde3e0d051798179e faiss DD: use 256-bit fast-scan QBS kernel on AMD Zen 4 (split AVX-512) (#5488)
-- c374dd917b75c8b1fef56e487d26e18d3aae5605 Panorama HNSW Optimizations (~x1.2) (#5190)
-- cb9a72ac03f4e7f7d563e3e54ab4e86b8ce1af12 Reuse the HNSW visited table across searches instead of reallocating per call (#5448)
-- 4d1657471f8590ccadf5c2f37d6b58999b8010ec Raise HNSW visited-table hash-set threshold from 500k to 10M (#5446)
-- a4b4c0f2de14d30719e0750e40922e47517eaa80 Optimize exhaustive_L2sqr_blas_cmax with AVX-512 intrinsics. (#4569)
-- 4a2f7e63280ec095bb16dbf0d8e837b2ab79c27f Optimize the DistanceComputerByte::compute_code_distance with AVX512F, AVX512BW, AVX512VL instructions (#5067)
-- 9a74c6d3d14ccf02157782c8f47205765fad63d9 Speed up Top1 and Reservoir add_results with AVX2/AVX512 (#5297)
-- 4030faae3d5b2c67a5931a637a1e77e2ceee9e1e Speed up polysemous training with AVX-512.
-- ea107641d4ccc350e9c3eebaffcada74b586d801 Parallelize inverted-list append loop in IndexIVFPQ::add_core_o (#5382)
-- cf045707c5342cf670b9e1176d47337b05fa0b6e ProductQuantizer::search_sdc: hoist per-subquantizer row pointers out of database-vector loop (#5338)
-- caf88fca98d6693366642cbb7d9b8df27dcb91ce Improve ranklist intersection size (#5237)
-- 5c1afeed9666448708c8a036136a8a8bdf8827e1 Remove dead code in quantize_ex_bits to avoid wasted compute (#5384)
-- e3dd6a85f3125d3338b2a5918e007230927c929f Remove unused fields in various DistanceComputers (#5318)
-- 35c5495b8fa8fcab4b8b476d6a6efde67d3a0e85 Remove confusing double-negative throw-macro conditions (#5471)
-- 9223d62e81d8cc5e0b5fb9aa20c48356c9670968 Rename SQI8 to SQ8 to be consistent with the rest of Faiss (#5337)
-- b37e929947d9116140392bc84bc6f0fea0c36b00 Reuse faiss.ResultHeap in benchs instead of duplicating it (#5363)
-- 1f755ef3d6bd274f64d344618d5c98dccd36d962 Prune cuVS brute-force flat index on aarch64 (FAISS_CUVS_NO_FLAT) (#5431)
-- 3a7cce4ea9861c14fb50c1b18ffbdd012312cda3 Faiss OSS CI: skip GPU jobs on PRs that touch no GPU-relevant code (#5402)
-- 0f48ae62101052cd6874381bc455155390891cad Faiss OSS autofix: force cuVS nightly to break (E2E validation) (#5328)
-- 0f0f728166218eab2605054c713cdf2646628014 Format faiss Python files with black (line length 80) (#5349)
-- 7a7a8f253207f684bbe0bac763e723f341f83b3e Align faiss .flake8 with black and the 80-char standard (#5350)
-- 259fa853af5974186797fc135ac0bd2b71f0b92b black -l 80: gpu/test formatting (1/3) (#5426)
-- a7d91d44d945b58baebe03ce4fdbdfecc55dec73 black -l 80: tests/ formatting (2/3) (#5427)
-- 3937552dd2e7309158804b024c68c7d0910761c4 black -l 80: benchs + python + refine test formatting (3/3) (#5428)
-- b75a23ca15996d9e33115b0c8730be1e30a0f515 black -l 80: python/__init__.pyi formatting (4/4) (#5429)
-- a238933d17b9abd0c0137cc7d0581bde7f164b46 Finish E501 line-length lint sweep across faiss (183 violations, 52 files) (#5444)
-- d4564bdeb2fcecb30a4957a7479be35c71b2d364 facebook-unused-include-check in distances_avx2.cpp (#5462)
-- ab3a5a95a61f42713cca0c15e67a290c8bcfcef5 facebook-unused-include-check in IndexIVFPQ.cpp (#5461)
-- e85b9bded90f06f9543e71e8c06686683dba8224 facebook-unused-include-check in test_svs.cpp (#5455)
-- 5e1cccea390984f52994d256c82c27c2e398fffe facebook-unused-include-check in TestGpuIndexIVFScalarQuantizer.cpp (#5454)
-- 003e002da66f523fd01254164677481f94025e22 facebook-unused-include-check in IndexBinaryHash.cpp (#5453)
-- c22dc247c095470580cf35b2be6b608976e24ea2 facebook-unused-include-check in avx2.cpp (#5452)
-- 76e2bbca43a5babdc8d7ca9b4e3ca175ffc39bfa facebook-unused-include-check in IndexBinaryHNSW.cpp (#5379)
-- 7c643c293067bc682085a8b16eba7b936316d265 facebook-unused-include-check in IndexIVFPQFastScan.cpp (#5378)
-- 3c5c27c881131d28794d54472ee18d9ce6a8e75f facebook-unused-include-check in avx2.cpp (#5377)
-- 9b33960463a3ffdbfa1aaf45325d5258b607cbd7 facebook-unused-include-check in test_ivf_early_termination.cpp (#5376)
-- 027054f40f78c4a8a42eeea43561ab99fb5deaf5 facebook-unused-include-check in IVFPQ_QueryTables.cpp (#5359)
-- f4cb963381c8afc3e5ba749df692fc017a7c17ff facebook-unused-include-check in avx2.cpp (#5358)
-- afc1be442b5f48082a346f78b6d9e0402862cac4 facebook-unused-include-check in hamming.cpp (#5355)
-- 6256cc7bd748ca8dd0c09d2b43b7ff52a84fb124 facebook-unused-include-check in IndexIVF.cpp (#5356)
-- 83dc6a6991abc67bad2026dbca94bb6696cc3cdf facebook-unused-include-check in IndexIVFSpectralHash.cpp (#5357)
-- 124bfa1d4f9f8f3b114bf9da602941d815248e07 facebook-unused-include-check in IndexSVSVamanaLeanVec.cpp (#5343)
-- a0457db86cd89e515782f65980af2748990184fb facebook-unused-include-check in avx2.cpp (#5344)
-- 595c5d7aa1f8a2f23a228faa8a9ab05cb6fe3acd facebook-unused-include-check in distances_simd.cpp (#5342)
-- 5437256fc557d86fd9a251ff1436b65eda10c203 facebook-unused-include-check in avx2.cpp (#5314)
-- 7c56a9dacd8ca2a4b161d57050e56a8222eac650 facebook-unused-include-check in avx2.cpp (#5315)
-- 0f280a7ca93da5ce9da6944ace8c1ff62afd3c18 facebook-unused-include-check in distances_simd.cpp (#5316)
 
 Fixed
 - 6187d940e329ae9d6073fe9d4c429a385707f606 clang-diagnostic-unused-parameter in GpuCloner.cpp (#5480)
@@ -735,23 +682,6 @@ Fixed
 ## [1.13.0] - 2025-11-11
 
 
-Added
-- 2cf82cabf2b2150ca76b9949377b484f109a94d1 Implement PanoramaStats (#4628)
-- 859127cd0b5e9f2ee52e095211202b0f5dbb6414 Implement serialization for `IndexIVFFlatPanorama` (#4636)
-- 7744239dc59c0cc9c665949f0d533daac40e567a Add getter/setter for balanced_bins in PCAMatrix C API issue #4617 (#4630)
-- e6510bd00478d563e380604374f41a27e8697ce6 Add immediate notification when autoclose label is applied (#4624)
-- f983e3ab69c46ecb7728395613ace22729bbd4a8 Integrate Panorama into `IndexIVFFlatPanorama` (#4606)
-- 3af3e00103079554b1071d2dcea7ccedc9693a44 Implementation of IndexIVFRaBitQFastScan (#4596)
-- f58fd4c8ca0fdf6c230c062ed70b93586ae9ec28 Add InvertedListScanner for IVFPQFastScan (#4537)
-- 01d394e5837f10c6270c7284c9f5e306c5cd87c4 RaBitQ Fast Scan (#4595)
-- 752832cac9c4038f52916a0ed2a839401671ce00 Add missing Thrust includes (#4597)
-- 6470b8d9d0f9c0adc71df6d5a1ce64199be85305 Simplify RaBitQ slightly, improving speed and recall (#4550)
-- bc3e3a1ef1464f1b90c6aa4ba4f075582e4f539a RaBitQ: SIMD helper simplification, use faster popcount for doc-side sum (#4573)
-- b7c88eaff82766c69cd3ab7a3a57fa4d4efb603f Microbenchmarks for rabitq_simd.h (#4572)
-- 786e4051fc7940825e8f6f5247bc269f4bc8bd11 RabitQ test coverage for SIMD codepaths (#4571)
-- fa5532734e40dbf66b571634ff597fe314ace054 Adding Idx tags in extended APIs (#4532)
-- fbbb290a5762e265a501324b3bfeb04c1cb5b006 Set NN Descent Metric From CAGRA Params (#4540)
-- 514b44fca8542bafe8640adcbf1cccce1900f74c OSS changes: Enable ROCm to work with Faiss on BUCK (#4485)
 
 
 Changed
@@ -1258,12 +1188,6 @@ Deprecated
 - Improved auto-vectorization support for IP and L2 distance computations (better handling of pragmas)
 - Improved ResidualQuantizer vector encoding (pooling memory allocations, avoid r/w to a temporary buffer)
 
-### Fixed
-- HNSW bug fixed which improves the recall rate! Special thanks to zh Wang @hhy3 for this.
-- Faiss GPU IVF large query batch fix
-- Faiss + Torch fixes, re-enable k = 2048
-- Fix the number of distance computations to match max_codes parameter
-- Fix decoding of large fast_scan blocks
 
 
 ## [1.7.3] - 2022-11-3

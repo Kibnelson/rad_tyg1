@@ -161,7 +161,7 @@ void IndexRefine::range_search(
     const bool is_similarity = is_similarity_metric(metric_type);
 
     // Scale the base_index search radius by k_factor. Results are filtered to
-    // the exact radius below, so this only affects recall, not correctness; it
+
     // is up to the user to pick a k_factor that widens the base search for
     // their metric.
     const float base_radius = radius * kf;

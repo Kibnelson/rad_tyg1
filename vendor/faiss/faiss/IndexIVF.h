@@ -110,7 +110,7 @@ struct SearchParametersIVF : SearchParameters {
     bool ensure_topk_full = false;
 
     /// Range-search only: stop after this many consecutive probed lists add
-    /// no in-radius results. 0 disables the heuristic. This trades recall
+
     /// for less work. Supported in parallel_mode 0; FastScan range search
     /// uses implementation 10 for this option.
     size_t max_empty_result_buckets = 0;

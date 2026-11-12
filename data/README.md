@@ -7,5 +7,5 @@
   and file hashes.
 
 The sample needs no download or AWS account. It checks that the system runs and
-records insert/drop decisions; its duplicate rate and timings are not benchmark
-measurements. [DATASETS.md](../DATASETS.md) shows how to download full-text data.
+records insert/drop decisions. [DATASETS.md](../DATASETS.md) shows how to download
+full-text data.

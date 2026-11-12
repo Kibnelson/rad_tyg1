@@ -129,7 +129,7 @@ class TestRaBitQ(unittest.TestCase):
 
             # PQ{D/4}x4fs, also 1 bit per query dimension
             index_pq = faiss.IndexPQFastScan(ds.d, ds.d // 4, 4, metric_type)
-            # Share a single quantizer (much faster, minimal recall change)
+
             index_pq.pq.train_type = faiss.ProductQuantizer.Train_shared
             if random_rotate:
                 # wrap with random rotations
@@ -312,7 +312,7 @@ class TestIVFRaBitQ(unittest.TestCase):
             index_pq = faiss.IndexIVFPQFastScan(
                 quantizer, d, nlist, d // 4, 4, metric_type
             )
-            # Share a single quantizer (much faster, minimal recall change)
+
             index_pq.pq.train_type = faiss.ProductQuantizer.Train_shared
             if random_rotate:
                 # wrap with random rotations
@@ -551,11 +551,11 @@ def do_test_serde(description):
 
 @for_all_simd_levels
 class TestMultiBitRaBitQ(unittest.TestCase):
-    """Consolidated tests for multi-bit RaBitQ.
+    ""
 
-    Tests IndexRaBitQ and IndexIVFRaBitQ for construction, basic operations,
-    recall, serialization, IVF operations, query quantization, and factory.
-    """
+
+
+
 
     # ==================== Construction Tests ====================
 
@@ -630,10 +630,10 @@ class TestMultiBitRaBitQ(unittest.TestCase):
                         self.assertTrue(np.all(I < ds.nb))
                         self.assertTrue(np.all(np.isfinite(D)))
 
-    # ==================== Recall Tests ====================
+
 
     def test_recall_quality(self):
-        """Test that recall is reasonable for various configurations."""
+        ""
         for metric in [faiss.METRIC_L2, faiss.METRIC_INNER_PRODUCT]:
             metric_str = "L2" if metric == faiss.METRIC_L2 else "IP"
             ds = datasets.SyntheticDataset(
@@ -654,7 +654,7 @@ class TestMultiBitRaBitQ(unittest.TestCase):
                         self.assertGreater(recall, 0.10)
 
     def test_recall_monotonic_improvement(self):
-        """Test that recall improves with more bits."""
+        ""
         for metric in [faiss.METRIC_L2, faiss.METRIC_INNER_PRODUCT]:
             metric_str = "L2" if metric == faiss.METRIC_L2 else "IP"
             ds = datasets.SyntheticDataset(
@@ -750,7 +750,7 @@ class TestMultiBitRaBitQ(unittest.TestCase):
                         self.assertTrue(np.all(np.isfinite(D)))
 
     def test_ivf_nprobe_improves_recall(self):
-        """Test that higher nprobe improves recall."""
+        ""
         for metric in [faiss.METRIC_L2, faiss.METRIC_INNER_PRODUCT]:
             metric_str = "L2" if metric == faiss.METRIC_L2 else "IP"
             ds = datasets.SyntheticDataset(

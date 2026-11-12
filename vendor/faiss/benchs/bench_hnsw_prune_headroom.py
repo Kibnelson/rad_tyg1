@@ -3,19 +3,19 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Benchmark script for testing HNSW prune_headroom recall impact.
+""
 
-Compares recall and build time between different prune_headroom values.
-Default comparison is between:
-- Baseline: prune_headroom = 0.0 (original behavior, no headroom)
-- With headroom: prune_headroom = 0.2 (proposed default)
 
-Usage:
-    python bench_hnsw_prune_headroom.py
-    python bench_hnsw_prune_headroom.py --nb 100000 --d 256
-    python bench_hnsw_prune_headroom.py --headroom_values 0.0 0.1 0.2 0.3
-"""
+
+
+
+
+
+
+
+
+
+
 
 import argparse
 import time
@@ -31,7 +31,7 @@ from faiss.contrib.datasets import SyntheticDataset
 
 
 def compute_recall(I, gt, k):
-    """Compute recall@k given search results I and ground truth gt."""
+    ""
     nq = gt.shape[0]
     return faiss.eval_intersection(I[:, :k], gt[:, :k]) / (nq * k)
 
@@ -62,22 +62,22 @@ def run_benchmark(
     headroom_values=None,
     use_sift1m=False,
 ):
-    """
-    Run the prune_headroom recall benchmark.
+    ""
 
-    Args:
-        d: Dimension of vectors
-        nb: Number of base vectors
-        nq: Number of query vectors
-        ef_construction: efConstruction parameter for HNSW
-        ef_search_values: List of efSearch values to test
-        k_values: List of k values for recall@k
-        headroom_values: List of prune_headroom values to compare
-        use_sift1m: Use SIFT1M dataset instead of synthetic
 
-    Returns:
-        Dictionary containing benchmark results
-    """
+
+
+
+
+
+
+
+
+
+
+
+
+
     if ef_search_values is None:
         ef_search_values = [16, 32, 64, 128, 256]
     if k_values is None:

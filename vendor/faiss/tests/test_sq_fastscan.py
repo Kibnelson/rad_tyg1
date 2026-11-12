@@ -90,7 +90,7 @@ class TestSQFastScanTrainAddSearch(unittest.TestCase):
 
 
 class TestSQFastScanRecallParity(unittest.TestCase):
-    """IndexSQFastScan recall should match IndexScalarQuantizer for 4-bit."""
+    ""
 
     def setUp(self):
         self.d = 64
@@ -101,7 +101,7 @@ class TestSQFastScanRecallParity(unittest.TestCase):
         self.D_gt, self.I_gt = gt_index.search(self.ds.get_queries(), 10)
 
     def test_native_4bit_parity(self):
-        """Native 4-bit: FastScan should match SQ recall exactly."""
+        ""
         for name, qtype in NATIVE_4BIT:
             with self.subTest(qtype=name):
                 sq = faiss.IndexScalarQuantizer(self.d, qtype)
@@ -533,7 +533,7 @@ class TestFastScanLUTScaleRounding(unittest.TestCase):
 
     def test_sq_fastscan_recall_at_d1024(self):
         # d = 1024 means M = 1024, four times the M = 257 point where the
-        # accumulator can wrap. A wrap makes the ranking noise, so R@1 collapses.
+
         d, n, nq = 1024, 2000, 50
         rng = np.random.default_rng(123)
         xb = rng.standard_normal((n, d), dtype=np.float32)

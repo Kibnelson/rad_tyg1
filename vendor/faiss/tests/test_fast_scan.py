@@ -42,21 +42,21 @@ class TestSearch(unittest.TestCase):
         assert recall_at_1 > 0.6
 
     def test_PQ4_search_matches_none(self):
-        """Fast-scan PQ search dispatches via the 256/512-bit QBS path.
+        ""
 
-        The integer QBS kernel is deterministic across SIMD levels *only if*
-        the upstream float PQ distance table is bit-identical AND the
-        handler's end() method (int-to-float conversion) compiles to
-        identical FP code.  Two cases break this:
 
-          1. aarch64 NEON/SVE: float distance-table computation reduces
-             in a different order, producing non-bit-identical LUT.
-          2. DD mode: per-SIMD TUs compile with different flags (-mfma
-             vs no -mfma), so handler end() may contract mul+add into
-             fma, producing 1-ULP float distance differences.
 
-        In both cases, fall back to a recall@1 check.
-        """
+
+
+
+
+
+
+
+
+
+
+
         ds = datasets.SyntheticDataset(32, 2000, 5000, 200)
         index = faiss.index_factory(32, "PQ16x4fs")
         index.train(ds.get_train())

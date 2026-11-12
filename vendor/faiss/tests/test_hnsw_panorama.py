@@ -43,8 +43,8 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
         return D, I
 
     def compute_recall(self, gt_I, test_I):
-        """Compute recall@k - fraction of ground truth results found in
-        test results."""
+        ""
+
         nq, k = gt_I.shape
         recalls = [np.isin(gt_I[i], test_I[i]).sum() for i in range(nq)]
         return sum(recalls) / (nq * k)
@@ -94,7 +94,7 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
         self.assertTrue(np.all(D >= 0.0))
 
     def test_recall(self):
-        """Test search recall quality."""
+        ""
         d = 128
         nb = 1000
         nt = 1500
@@ -118,11 +118,11 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
         # Compute ground truth
         gt_D, gt_I = self.compute_ground_truth(xb, xq, k)
 
-        # Check recall
+
         recall = self.compute_recall(gt_I, I)
         print(f"Recall@{k}: {recall}")
 
-        # With efSearch=64, we should get reasonably good recall
+
         # The threshold is lower than vanilla HNSW because of approximate
         # distances
         self.assertGreaterEqual(recall, 0.85)
@@ -154,7 +154,7 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
                 recall = self.compute_recall(gt_I, I)
                 print(f"Recall@{k} with {nlevels} levels: {recall}")
 
-                # More levels should still maintain reasonable recall
+
                 self.assertGreaterEqual(recall, 0.80)
 
     def test_uneven_dimension_division(self):
@@ -396,7 +396,7 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
         recall = self.compute_recall(gt_I, I_after)
         print(f"Recall after adding more vectors: {recall}")
 
-        # Recall might be slightly lower than single-batch due to HNSW
+
         # graph structure
         self.assertGreaterEqual(recall, 0.80)
 
@@ -481,7 +481,7 @@ class TestIndexHNSWFlatPanorama(unittest.TestCase):
                         f"Permuted ID mismatch at position ({i}, {j})",
                     )
 
-        # Verify overall recall is maintained
+
         gt_D, gt_I = self.compute_ground_truth(xb, xq, k)
 
         # Map ground truth IDs through the permutation

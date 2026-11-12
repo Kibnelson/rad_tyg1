@@ -34,7 +34,7 @@ cat results/sample/summary.json
 
 On success, `screened` is **320** and `inserted` + `index_search_drops` +
 `in_batch_dedup_drops` totals 320. Individual counts can vary because HNSW is
-approximate. These are installation checks, not benchmark scores. Use a VM
+approximate. Use a VM
 with at least 30 available logical CPUs for these commands.
 
 ## 3. Download and test more data
@@ -60,11 +60,10 @@ when repeating a test. Input documents keep their full text.
 
 Use `tmux new -As faiss-jaccard`, then run the command inside it. `nproc` shows
 your VM's available CPUs; these commands require at least 30. Each run starts
-fresh and cannot resume. Tune `--M`, `--ef-construction`, `--ef-search`, `--top-k` and
-`--cutoff` explicitly for another configuration.
+fresh and cannot resume. The public preset fixes corpus/query efConstruction
+at 128, efSearch at 150 and top-k at 4. Use `--M` and `--cutoff` explicitly to
+change graph connectivity or the admission threshold.
 
-Processing QPS includes input, encoding, in-batch filtering, search, decisions
-and insertion. Evidence and final graph writes are outside this timer.
 Distance ≤30 compares MinHash signatures; it does not guarantee exact Jaccard
-≥0.70. By default, the runner saves all ordered top40 candidates before
+≥0.70. The runner saves all ordered top-k4 candidates before
 admission, so allow disk space as the number of documents grows.

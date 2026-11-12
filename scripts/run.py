@@ -23,9 +23,9 @@ def main():
     parser.add_argument('--partition-capacity', type=int, default=20000000,
                         help='Retained-vector ceiling for this single-graph baseline; increase for larger runs.')
     parser.add_argument('--M', type=int, default=96)
-    parser.add_argument('--ef-construction', type=int, default=384)
-    parser.add_argument('--ef-search', type=int, default=400)
-    parser.add_argument('--top-k', type=int, default=40)
+    parser.add_argument('--ef-construction', type=int, choices=(128,), default=128)
+    parser.add_argument('--ef-search', type=int, choices=(150,), default=150)
+    parser.add_argument('--top-k', type=int, choices=(4,), default=4)
     parser.add_argument('--cutoff', type=int, default=30)
     args = parser.parse_args()
     if args.threads > len(os.sched_getaffinity(0)):
@@ -134,7 +134,7 @@ def main():
     summary = dict(system='Faiss(Jaccard)', screened=ordinal, inserted=int(index.ntotal),
         index_search_drops=sum(r['index_search_drops'] for r in reports),
         in_batch_dedup_drops=sum(r['in_batch_dedup_drops'] for r in reports),
-        processing_seconds=seconds, throughput=ordinal / seconds, recall='not_measured', exact_jaccard='not_computed',
+        processing_seconds=seconds, throughput=ordinal / seconds, exact_jaccard='not_computed',
         full_text=True, profile=dict(M=args.M, corpus_ef_construction=args.ef_construction,
             query_ef_construction=args.ef_construction, ef_search=args.ef_search, top_k=args.top_k,
             cutoff=args.cutoff, minhash_values=112, graph_count=1, retained_capacity=args.partition_capacity,

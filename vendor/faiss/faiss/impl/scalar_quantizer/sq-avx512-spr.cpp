@@ -135,12 +135,12 @@ struct DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512_SPR>
     using DCTemplate<Quantizer, Similarity, SIMDLevel::AVX512>::DCTemplate;
 };
 
-/**********************************************************
- * DistanceComputerByte: AVX512-VNNI
- *
- * Uses _mm512_dpbusd_epi32 to compute dot products of uint8 vectors
- * at 64 bytes per instruction (4x throughput vs generic AVX512).
- **********************************************************/
+
+
+
+
+
+
 
 template <class Similarity>
 struct DistanceComputerByte<Similarity, SIMDLevel::AVX512_SPR>

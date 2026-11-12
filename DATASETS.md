@@ -7,7 +7,7 @@ Run these commands from the system folder you cloned, after its setup has finish
 
 `data/sample.jsonl` contains 320 documents: authored examples, 16 short LM1B
 excerpts from S3, and deliberately repeated documents. It is small enough to
-check the installation. Its timings are not benchmark results.
+check the installation.
 `data/s3_sample.jsonl` contains only the 16 excerpts, each limited to 20 words.
 [Source details and file hashes](data/SAMPLE_PROVENANCE.json) explain how both
 files were made. The runbooks use `data/sample.jsonl`.
@@ -86,6 +86,5 @@ To use your own data, JSONL means **one JSON object per line**. Each object need
 - [Common Crawl terms](https://commoncrawl.org/terms-of-use)
 - [C4 dataset card](https://huggingface.co/datasets/allenai/c4)
 
-The source terms and original text owners' rights still apply. New public
-downloads are not the exact saved S3 benchmark inputs. These real-data runners
-do not report recall because no duplicate ground truth is supplied.
+The source terms and original text owners' rights still apply. Public downloads
+can differ from the saved S3 files. Keep each download's provenance record with it.

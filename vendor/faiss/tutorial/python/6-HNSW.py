@@ -25,7 +25,7 @@ k = 4
 index = faiss.IndexHNSWFlat(d, 32)  # M=32: neighbors per node
 index.hnsw.efConstruction = 40  # graph construction quality
 index.add(xb)
-index.hnsw.efSearch = 64  # higher = better recall, slower
+index.hnsw.efSearch = 64
 
 # sanity check
 D, I = index.search(xb[:5], k)

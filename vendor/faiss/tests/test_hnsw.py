@@ -311,11 +311,11 @@ class TestHNSWLevel0LinksFromSample(unittest.TestCase):
         return rng.standard_normal((self.nnodes, self.d)).astype(np.float32)
 
     def check_planted_sink_removed(self, index, add_links):
-        """Plants a sink in `index`, calls `add_links` with vectors near the
-        nodes, and compares the recall@1 on other vectors with the recall of
-        the intact graph. The intact recall is below 1 when the HNSW search
-        and the storage search use different distance estimates, for example
-        with RaBitQ."""
+        ""
+
+
+
+
         nodes = self.nodes()
         index.train(nodes)
         index.add(nodes)

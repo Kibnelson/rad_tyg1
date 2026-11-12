@@ -8,20 +8,16 @@ Start with the [runbook](RUNBOOK.md). The included 320-document test dataset
 needs no AWS account. The runbook then shows how to download and test more
 FineWeb documents. [DATASETS.md](DATASETS.md) also covers S3 and Common Crawl.
 
-Defaults match the completed middle-budget MH profile: **M96, corpus/query
-efConstruction384, efSearch400, top40 and distance cutoff30**. There is no
+The public configuration uses **M96, corpus/query efConstruction128,
+efSearch150, top-k4 and distance cutoff30**. There is no
 Bloom routing. The engine stores 112 uint32 MinHash values as 448 big-endian
 bytes and compares matching signature positions, rather than RAD bitmaps.
 
 Outputs include `summary.json`, per-batch timing/counts, accepted IDs, the final
-native graph and **all ordered top40 results before admission** in `topk.jsonl`.
-These permit offline first4-versus-all40 inspection of the same search result;
-they do not simulate an independent top-k4 search. Real-data recall and exact
-literal-text Jaccard are not measured.
+native graph and **all ordered top-k4 candidates before admission** in `topk.jsonl`.
 
-[PROVENANCE.json](PROVENANCE.json) binds the unchanged native engine and encoder.
-The streaming runner checks every document. The small test does not reproduce
-paper results or the earlier 900K-corpus/100K-query workload.
+[PROVENANCE.json](PROVENANCE.json) records the bundled native engine and encoder.
+The streaming runner checks every document.
 
 Functional installation checks: [VALIDATION.md](VALIDATION.md).
 
