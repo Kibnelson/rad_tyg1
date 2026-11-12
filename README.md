@@ -13,6 +13,9 @@ the original private repository is required.
 Follow [RUNBOOK.md](RUNBOOK.md) to build the server and run the included sample.
 [VALIDATION.md](VALIDATION.md) lists installation checks.
 
+The Milvus native engine and MinHash-LSH configuration were tested on GCP using
+the experiment runbooks. The public runbook uses the same engine and index settings.
+
 ## Settings
 
 Each document uses 112 uint32 MinHash values, grouped into 14 bands of eight.

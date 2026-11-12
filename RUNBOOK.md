@@ -1,5 +1,9 @@
 # Run Milvus
 
+The Milvus native engine and MinHash-LSH configuration were tested on GCP using
+the experiment runbooks. This public runbook uses the same engine and index
+settings. Follow the steps in order.
+
 Use an x86-64 Ubuntu 24.04 VM with sudo, at least 30 available logical CPUs,
 64 GB RAM and 100 GB free disk for the build. Large datasets and results need
 more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
@@ -50,7 +54,7 @@ cat results/sample/SUMMARY.json
 
 A successful run reports `status: completed` and `screened: 320`. The inserted,
 index-search drop and in-batch drop counts must add up to 320. See
-[README.md](README.md#results-and-timing) for the output files and timing scope.
+[README.md](README.md#saved-files) for the output files and timing scope.
 
 ## 4. Download and run more data
 

@@ -1,9 +1,14 @@
 # Installation checks
 
-The portable package has passed these checks on Linux x86-64 with Python 3.10:
+The Milvus native engine and MinHash-LSH configuration were tested on GCP using
+the experiment runbooks. The public runbook uses the same engine and index settings.
+
+The record below separates that GCP check from the public-package checks on
+Linux x86-64 with Python 3.10:
 
 | Check | Result |
 |---|---|
+| Milvus native engine and MinHash-LSH profile using the experiment runbooks on GCP | Passed |
 | SHA-256 inventory of pinned native source files | Passed |
 | Source SDK wheel build, installation and import as pymilvus 3.0.2 | Passed |
 | Pinned Go/Rust toolchain installation with official checksums | Passed |
