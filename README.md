@@ -7,7 +7,9 @@ code, an installation runbook, a small test dataset and commands for larger inpu
 RAD checks each incoming batch against documents already kept. It uses MinHash
 bitmap signatures, Bloom routing and a partitioned HNSW index. Accepted documents
 fill the active partition in order; a full partition is sealed and a new one opens.
-Queries search the partitions selected by the Bloom filters.
+Queries search the partitions selected by the Bloom filters. A memory-budgeted
+variant can keep a smaller working set, such as three partitions, and load
+others as needed; the supplied runner uses all-resident indexes.
 
 ## Choose a system
 
@@ -22,7 +24,8 @@ into a separate folder; you do not need to clone `main` first.
 | Faiss(Jaccard) | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/tree/faiss_jaccard) | [Faiss(Jaccard) runbook](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/RUNBOOK.md) |
 
 The `main` branch holds shared documentation, sample data and download tools.
-RAD and Faiss(Jaccard) use **M96, efConstruction 128, efSearch 150 and top-k 4**.
+RAD uses **M96, corpus/query efConstruction 128, efSearch 150 and top-k 4**.
+Faiss(Jaccard) uses **M96, corpus/query efConstruction 384, efSearch 400 and top-k 4**.
 RAD applies efConstruction 128 to corpus and accepted-query insertions. Its
 nominal bitmap-score threshold is **0.7**, implemented as the quantized
 bitmap-distance rule **D ≤ 30**; this is not an exact text-Jaccard test.
