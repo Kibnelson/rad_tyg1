@@ -810,8 +810,8 @@ class TestRefine(unittest.TestCase):
                 dref = np.dot(x1, x2)
             np.testing.assert_almost_equal(dref, D2[i, 5], decimal=5)
 
-        # check that with refinement, the recall@10 is the same as
-        # the original recall@100
+
+
         recall2 = (I2 == Iref[:, :1]).sum()
         self.assertEqual(recall1, recall2)
 

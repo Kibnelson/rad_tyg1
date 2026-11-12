@@ -14,31 +14,30 @@ a full partition stays searchable while new documents enter the next partition.
 Each partition has a Bloom filter that selects which queries need to search it.
 All partitions stay in memory, and selected partitions are searched one at a time.
 
-Defaults: **M96, corpus/query efConstruction96, efSearch100, top4, bitmap cutoff
-D≤50, 10K-document batches and 1M kept documents per partition**. Routing uses
+Defaults: **M96, corpus/query efConstruction128, efSearch150, top4, bitmap cutoff
+D≤30, 10K-document batches and 1M kept documents per partition**. Routing uses
 37 position-tagged groups of three MinHash values. Queries routed to no partition
-are inserted. D≤50 is an approximate bitmap rule, not an exact Jaccard≥0.70 test.
+are inserted. The bitmap similarity target is 0.70. Native distance is serialized
+as `D = floor(100 × (1 − bitmap Jaccard) + 1e-6)`, and admission uses `D≤30`.
+This quantized bitmap rule is not an exact text-Jaccard threshold.
 
 The runbook passes `--distance-mode cache_scalar`, which needs AVX2 and POPCNT.
 The runner defaults to `cache_simd` if that option is omitted; this kernel
 additionally requires AVX-512 VPOPCNTDQ. The chosen kernel is recorded in the results.
-The earlier graph profile is available with
-`--ef-construction 128 --ef-search 150 --top-k 40`.
 
 ## Results
 
 `summary.json` shows document counts, settings, and total documents divided by
 processing time. `batches.csv` gives counts, stage timings and partition visits
 for each batch. `evidence/batch_*.jsonl` records ordered candidates and decisions;
-`batch_*_metadata.json` gives per-partition search details. Use `--top-k 40` to
-keep all returned top40 candidates for later first4-versus-top40 inspection.
+`batch_*_metadata.json` gives per-partition search details. Each searched query
+keeps up to four ordered candidates.
 Index IDs are input positions; `source_id` keeps the supplied document ID.
 
 Processing time includes input reading, MinHash, in-batch filtering, bitmap
 creation, routing/search/merge, duplicate decisions and insertion. Writing
 results/checkpoints and setup/download/build time are excluded. There are no
-separate warmup searches in this public runner. Sample timings are installation
-checks, not the earlier paper results; real-data recall is not measured.
+separate warmup searches in this public runner.
 
 [Native test results](VALIDATION.json) and [source provenance](PROVENANCE.md)
 record what was checked and where the code came from.

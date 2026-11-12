@@ -25,7 +25,7 @@ except ImportError:
 
 
 def eval_recall(index, efSearch_val, xq, gt, k):
-    """Evaluate recall and QPS for a given efSearch value."""
+    ""
     nq = len(xq)
     faiss.cvar.indexPanorama_stats.reset()
     t0 = time.time()

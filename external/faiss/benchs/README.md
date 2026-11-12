@@ -45,21 +45,6 @@ and unzip it to the subdirectory sift1M.
 
 The output looks like:
 
-```
-PQ training on 100000 points, remains 0 points: training polysemous on centroids
-add vectors to index
-PQ baseline        7.517 ms per query, R@1 0.4474
-Polysemous 64      9.875 ms per query, R@1 0.4474
-Polysemous 62      8.358 ms per query, R@1 0.4474
-Polysemous 58      5.531 ms per query, R@1 0.4474
-Polysemous 54      3.420 ms per query, R@1 0.4478
-Polysemous 50      2.182 ms per query, R@1 0.4475
-Polysemous 46      1.621 ms per query, R@1 0.4408
-Polysemous 42      1.448 ms per query, R@1 0.4174
-Polysemous 38      1.331 ms per query, R@1 0.3563
-Polysemous 34      1.334 ms per query, R@1 0.2661
-Polysemous 30      1.272 ms per query, R@1 0.1794
-```
 
 
 ## Experiments on 1B elements dataset
@@ -113,31 +98,6 @@ above, we use bash's [brace expansion](https://www.gnu.org/software/bash/manual/
 
 The search is *not* multithreaded, and the output looks like:
 
-```
-                                        R@1    R@10   R@100     time    %pass
-nprobe=16,max_codes=10000,ht=44         0.1779 0.2994 0.3139    0.194   12.45
-nprobe=16,max_codes=10000,ht=45         0.1859 0.3183 0.3339    0.197   14.24
-nprobe=16,max_codes=10000,ht=46         0.1930 0.3366 0.3543    0.202   16.22
-nprobe=16,max_codes=10000,ht=47         0.1993 0.3550 0.3745    0.209   18.39
-nprobe=16,max_codes=10000,ht=48         0.2033 0.3694 0.3917    0.640   20.77
-nprobe=16,max_codes=10000,ht=49         0.2070 0.3839 0.4077    0.229   23.36
-nprobe=16,max_codes=10000,ht=50         0.2101 0.3949 0.4205    0.232   26.17
-nprobe=16,max_codes=10000,ht=51         0.2120 0.4042 0.4310    0.239   29.21
-nprobe=16,max_codes=10000,ht=52         0.2134 0.4113 0.4402    0.245   32.47
-nprobe=16,max_codes=10000,ht=53         0.2157 0.4184 0.4482    0.250   35.96
-nprobe=16,max_codes=10000,ht=54         0.2170 0.4240 0.4546    0.256   39.66
-nprobe=16,max_codes=30000,ht=44         0.1882 0.3327 0.3555    0.226   11.29
-nprobe=16,max_codes=30000,ht=45         0.1964 0.3525 0.3771    0.231   13.05
-nprobe=16,max_codes=30000,ht=46         0.2039 0.3713 0.3987    0.236   15.01
-nprobe=16,max_codes=30000,ht=47         0.2103 0.3907 0.4202    0.245   17.19
-nprobe=16,max_codes=30000,ht=48         0.2145 0.4055 0.4384    0.251   19.60
-nprobe=16,max_codes=30000,ht=49         0.2179 0.4198 0.4550    0.257   22.25
-nprobe=16,max_codes=30000,ht=50         0.2208 0.4305 0.4681    0.268   25.15
-nprobe=16,max_codes=30000,ht=51         0.2227 0.4402 0.4791    0.275   28.30
-nprobe=16,max_codes=30000,ht=52         0.2241 0.4473 0.4884    0.284   31.70
-nprobe=16,max_codes=30000,ht=53         0.2265 0.4544 0.4965    0.294   35.34
-nprobe=16,max_codes=30000,ht=54         0.2278 0.4601 0.5031    0.303   39.20
-```
 
 The result reported in table 2 is the one for which the %pass (percentage of code comparisons that pass the Hamming check) is around 20%, which occurs for Hamming threshold `ht=48`.
 
@@ -147,33 +107,10 @@ The 8-byte results can be reproduced with the factory key `IMI2x12,PQ8`
 
 The experiments in the appendix are only in the ArXiv version of the paper (table 3).
 
-```
-python bench_polysemous_1bn.py SIFT1000M OPQ8_64,IMI2x13,PQ8 nprobe={1,2,4,8,16,32,64,128},ht={20,24,26,28,30}
-
-                        R@1    R@10   R@100     time    %pass
-nprobe=1,ht=20          0.0351 0.0616 0.0751    0.158   19.01
-...
-nprobe=32,ht=28         0.1256 0.3563 0.5026    0.561   52.61
-...
-```
 Here again the runs are not exactly the same but the original result was obtained from nprobe=32,ht=28.
 
 For Deep1B, we used a simple version of [auto-tuning](https://github.com/facebookresearch/faiss/wiki/High-level-interface-and-auto-tuning/_edit#auto-tuning-the-runtime-parameters) to sweep through the set of operating points:
 
-```
-python bench_polysemous_1bn.py Deep1B OPQ20_80,IMI2x14,PQ20 autotune
-...
-Done in 4067.555 s, available OPs:
-Parameters                                1-R@1     time
-                                          0.0000    0.000
-nprobe=1,ht=22,max_codes=256              0.0215    3.115
-nprobe=1,ht=30,max_codes=256              0.0381    3.120
-...
-nprobe=512,ht=68,max_codes=524288         0.4478   36.903
-nprobe=1024,ht=80,max_codes=131072        0.4557   46.363
-nprobe=1024,ht=78,max_codes=262144        0.4616   61.939
-...
-```
 The original results were obtained with `nprobe=1024,ht=66,max_codes=262144`.
 
 
@@ -186,40 +123,6 @@ The benchmarks below run 1 or 4 Titan X GPUs and reproduce the results of the "G
 See above on how to get SIFT1M into subdirectory sift1M/. The script [`bench_gpu_sift1m.py`](bench_gpu_sift1m.py) reproduces the "exact k-NN time" plot in the ArXiv paper, and the SIFT1M numbers.
 
 The output is:
-```
-============ Exact search
-add vectors to index
-warmup
-benchmark
-k=1 0.715 s, R@1 0.9914
-k=2 0.729 s, R@1 0.9935
-k=4 0.731 s, R@1 0.9935
-k=8 0.732 s, R@1 0.9935
-k=16 0.742 s, R@1 0.9935
-k=32 0.737 s, R@1 0.9935
-k=64 0.753 s, R@1 0.9935
-k=128 0.761 s, R@1 0.9935
-k=256 0.799 s, R@1 0.9935
-k=512 0.975 s, R@1 0.9935
-k=1024 1.424 s, R@1 0.9935
-============ Approximate search
-train
-WARNING clustering 100000 points to 4096 centroids: please provide at least 159744 training points
-add vectors to index
-WARN: increase temp memory to avoid cudaMalloc, or decrease query/add size (alloc 256000000 B, highwater 256000000 B)
-warmup
-benchmark
-nprobe=   1 0.043 s recalls= 0.3909 0.4312 0.4312
-nprobe=   2 0.040 s recalls= 0.5041 0.5636 0.5636
-nprobe=   4 0.048 s recalls= 0.6048 0.6897 0.6897
-nprobe=   8 0.064 s recalls= 0.6879 0.8028 0.8028
-nprobe=  16 0.088 s recalls= 0.7534 0.8940 0.8940
-nprobe=  32 0.134 s recalls= 0.7957 0.9549 0.9550
-nprobe=  64 0.224 s recalls= 0.8125 0.9833 0.9834
-nprobe= 128 0.395 s recalls= 0.8205 0.9953 0.9954
-nprobe= 256 0.717 s recalls= 0.8227 0.9993 0.9994
-nprobe= 512 1.348 s recalls= 0.8228 0.9999 1.0000
-```
 The run produces two warnings:
 
 - the clustering complains that it does not have enough training data, there is not much we can do about this.
@@ -228,18 +131,6 @@ The run produces two warnings:
 
 To index small datasets, it is more efficient to use a `GpuIVFFlat`, which just stores the full vectors in the inverted lists. We did not mention this in the paper because it is not as scalable. To experiment with this setting, change the `index_factory` string from "IVF4096,PQ64" to "IVF16384,Flat". This gives:
 
-```
-nprobe=   1 0.025 s recalls= 0.4084 0.4105 0.4105
-nprobe=   2 0.033 s recalls= 0.5235 0.5264 0.5264
-nprobe=   4 0.033 s recalls= 0.6332 0.6367 0.6367
-nprobe=   8 0.040 s recalls= 0.7358 0.7403 0.7403
-nprobe=  16 0.049 s recalls= 0.8273 0.8324 0.8324
-nprobe=  32 0.068 s recalls= 0.8957 0.9024 0.9024
-nprobe=  64 0.104 s recalls= 0.9477 0.9549 0.9549
-nprobe= 128 0.174 s recalls= 0.9760 0.9837 0.9837
-nprobe= 256 0.299 s recalls= 0.9866 0.9944 0.9944
-nprobe= 512 0.527 s recalls= 0.9907 0.9987 0.9987
-```
 
 ### Clustering on MNIST8m
 
@@ -267,19 +158,6 @@ The search results on SIFT1B in the "GPU paper" can be obtained with
 
 <!-- see P57124181 -->
 
-```
-python bench_gpu_1bn.py SIFT1000M OPQ8_32,IVF262144,PQ8 -nnn 10 -ngpu 1 -tempmem $[1536*1024*1024]
-...
-0/10000 (0.024 s)      probe=1  : 0.161 s 1-R@1: 0.0752 1-R@10: 0.1924
-0/10000 (0.005 s)      probe=2  : 0.150 s 1-R@1: 0.0964 1-R@10: 0.2693
-0/10000 (0.005 s)      probe=4  : 0.153 s 1-R@1: 0.1102 1-R@10: 0.3328
-0/10000 (0.005 s)      probe=8  : 0.170 s 1-R@1: 0.1220 1-R@10: 0.3827
-0/10000 (0.005 s)      probe=16 : 0.196 s 1-R@1: 0.1290 1-R@10: 0.4151
-0/10000 (0.006 s)      probe=32 : 0.244 s 1-R@1: 0.1314 1-R@10: 0.4345
-0/10000 (0.006 s)      probe=64 : 0.353 s 1-R@1: 0.1332 1-R@10: 0.4461
-0/10000 (0.005 s)      probe=128: 0.587 s 1-R@1: 0.1341 1-R@10: 0.4502
-0/10000 (0.006 s)      probe=256: 1.160 s 1-R@1: 0.1342 1-R@10: 0.4511
-```
 
 We use the `-tempmem` option to reduce the temporary memory allocation to 1.5G, otherwise the dataset does not fit in GPU memory
 
@@ -287,20 +165,6 @@ We use the `-tempmem` option to reduce the temporary memory allocation to 1.5G, 
 
 The same script generates the GPU search results on Deep1B.
 
-```
-python bench_gpu_1bn.py  Deep1B OPQ20_80,IVF262144,PQ20 -nnn 10 -R 2 -ngpu 4 -altadd -noptables -tempmem $[1024*1024*1024]
-...
-
-0/10000 (0.115 s)      probe=1  : 0.239 s 1-R@1: 0.2387 1-R@10: 0.3420
-0/10000 (0.006 s)      probe=2  : 0.103 s 1-R@1: 0.3110 1-R@10: 0.4623
-0/10000 (0.005 s)      probe=4  : 0.105 s 1-R@1: 0.3772 1-R@10: 0.5862
-0/10000 (0.005 s)      probe=8  : 0.116 s 1-R@1: 0.4235 1-R@10: 0.6889
-0/10000 (0.005 s)      probe=16 : 0.133 s 1-R@1: 0.4517 1-R@10: 0.7693
-0/10000 (0.005 s)      probe=32 : 0.168 s 1-R@1: 0.4713 1-R@10: 0.8281
-0/10000 (0.005 s)      probe=64 : 0.238 s 1-R@1: 0.4841 1-R@10: 0.8649
-0/10000 (0.007 s)      probe=128: 0.384 s 1-R@1: 0.4900 1-R@10: 0.8816
-0/10000 (0.005 s)      probe=256: 0.736 s 1-R@1: 0.4933 1-R@10: 0.8912
-```
 
 Here we are a bit tight on memory so we disable precomputed tables (`-noptables`) and restrict the amount of temporary memory. The `-altadd` option avoids GPU memory overflows during add.
 
@@ -348,7 +212,6 @@ Certain tests / benchmarks might be outdated.
 * bench_hamming_computer.cpp - specialized implementations for Hamming distance computations
 * bench_heap_replace.cpp - benchmarks different implementations of certain calls for a Heap data structure
 * bench_hnsw.py - benchmarks HNSW in combination with other ones for SIFT1M dataset
-* bench_hnsw_prune_headroom.py - benchmarks HNSW prune_headroom recall and build time impact
 * bench_index_flat.py - benchmarks IndexFlatL2 on a synthetic dataset
 * bench_index_pq.py - benchmarks PQ on SIFT1M dataset
 * bench_ivf_fastscan_single_query.py - benchmarks a single query for different nprobe levels for IVF{nlist},PQ{M}x4fs on BIGANN dataset

@@ -150,7 +150,7 @@ void IndexSQFastScan::search(
         return;
     }
 
-    // The 4-bit scan is a shortlist. rerank_factor bounds the recall.
+
     idx_t k_coarse = idx_t(double(k) * rerank_factor);
     FAISS_THROW_IF_NOT(k_coarse >= k);
     FAISS_THROW_IF_NOT_MSG(

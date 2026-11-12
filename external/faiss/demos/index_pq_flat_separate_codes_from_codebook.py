@@ -153,13 +153,6 @@ id_wrapper_index.search(query_vector_float32, k=5)
 !rm /tmp/ids.npy /tmp/codes.npy /tmp/template.index
 
 """:md
-## Comparing these methods
-
-- methods: Flat, LSH, PQ
-- vary cost: nbits, M for 1x, 2x, 4x, 8x, 16x, 32x compression
-- measure: recall@1
-
-We don't measure latency as the number of vectors per user shard is insignificant.
 
 """
 
@@ -276,7 +269,7 @@ def create_grouped_bar_chart(x_values, y_values_list, labels_list, xlabel, ylabe
 
 """:py '1630106834206134'"""
 # x-axis: compression ratio
-# y-axis: recall@1
+
 
 from collections import defaultdict
 

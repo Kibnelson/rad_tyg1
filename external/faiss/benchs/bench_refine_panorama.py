@@ -111,7 +111,7 @@ for nprobe in nprobe_list:
             qps_f_list.append(qps_f)
             qps_p_list.append(qps_p)
 
-            # Draw speedup and recall
+
             plt.plot([kf, kf], [qps_f, qps_p], "k--", linewidth=1, alpha=0.7)
             mid_y = (qps_f * qps_p) ** 0.5
             plt.text(

@@ -154,17 +154,6 @@ To test, run:
 python combined_index.py
 ```
 The output should look like:
-```bash
-(faiss_1.5.2) matthijs@devfair0144:~/faiss_versions/faiss_1Tcode/faiss/benchs/distributed_ondisk$ python combined_index.py
-reading /checkpoint/matthijs/ondisk_distributed//hslices/slice49.faissindex
-loading empty index /checkpoint/matthijs/ondisk_distributed/trained.faissindex
-replace invlists
-loaded index of size  1000000000
-nprobe=1 1-recall@1=0.2904 t=12.35s
-nnprobe=10 1-recall@1=0.6499 t=17.67s
-nprobe=100 1-recall@1=0.8673 t=29.23s
-nprobe=1000 1-recall@1=0.9132 t=129.58s
-```
 ie. searching is a lot slower than from RAM.
 
 ## Distributed query

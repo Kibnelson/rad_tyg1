@@ -28,7 +28,8 @@ install its matching development/venv packages and change `PYTHON` above.
 ```bash
 .venv/bin/python scripts/check_fixture.py
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 30 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar
+  --threads 30 --batch-size 100 --partition-capacity 1000 --distance-mode cache_scalar \
+  --ef-construction 128 --ef-search 150 --top-k 4 --cutoff 30
 cat results/sample/summary.json
 ```
 
@@ -47,7 +48,8 @@ kernel as the sample. Stay in the cloned folder:
 .venv/bin/python -m pip install -r requirements-data.txt
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl --output results/fineweb \
-  --threads 30 --batch-size 10000 --distance-mode cache_scalar
+  --threads 30 --batch-size 10000 --distance-mode cache_scalar \
+  --ef-construction 128 --ef-search 150 --top-k 4 --cutoff 30
 cat results/fineweb/summary.json
 ```
 

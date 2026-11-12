@@ -15,6 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'external/simd')]
+from radv2 import defaults
 
 
 def atomic(path, text):
@@ -62,7 +63,7 @@ def reports(out, state, store, identity, status):
     summary = dict(system='RAD', status=status, **counts, stored_rows=int(store.ntotal),
         processing_seconds=seconds, throughput=counts['screened'] / seconds if seconds else None,
         partition_counts=[int(p.index.ntotal) for p in store.partitions], profile=identity['profile'],
-        input_sha256=identity['input_sha256'], recall='not_measured', exact_jaccard='not_computed',
+        input_sha256=identity['input_sha256'], exact_jaccard='not_computed',
         timing_scope='Summed input read, MinHash, in-batch SIMD, bitmap, Bloom/search/merge, decisions and accepted insertion. Evidence/checkpoint/report writes are outside processing throughput.',
         index_id_policy='Zero-based input ordinal; source_id preserves the supplied id.',
         evidence='evidence/batch_*.jsonl preserves every ordered returned candidate and insertion decision.')
@@ -82,10 +83,11 @@ def main():
     ap.add_argument('--partition-capacity', type=int, default=1000000)
     ap.add_argument('--max-documents', type=int)
     ap.add_argument('--M', type=int, default=96)
-    ap.add_argument('--ef-construction', type=int, default=96)
-    ap.add_argument('--ef-search', type=int, default=100)
-    ap.add_argument('--top-k', type=int, default=4)
-    ap.add_argument('--cutoff', type=int, default=50)
+    ap.add_argument('--ef-construction', type=int, choices=(128,), default=128)
+    ap.add_argument('--ef-search', type=int, choices=(150,), default=150)
+    ap.add_argument('--top-k', type=int, choices=(4,), default=4)
+    ap.add_argument('--cutoff', type=int, choices=(defaults.BITMAP_DISTANCE_CUTOFF,),
+                    default=defaults.BITMAP_DISTANCE_CUTOFF)
     ap.add_argument('--distance-mode', choices=('cache_simd', 'cache_scalar'), default='cache_simd')
     ap.add_argument('--resume', action='store_true')
     args = ap.parse_args()
@@ -122,6 +124,8 @@ def main():
     faiss.omp_set_num_threads(args.threads)
     profile = dict(M=args.M, ef_construction=args.ef_construction, query_ef_construction=args.ef_construction,
         ef_search=args.ef_search, top_k=args.top_k, cutoff=args.cutoff, distance_mode=args.distance_mode,
+        bitmap_similarity_target=defaults.BITMAP_SIMILARITY_TARGET,
+        distance_serialization='floor(100 * (1 - bitmap_Jaccard) + 1e-6)',
         threads=args.threads, batch_size=args.batch_size, partition_capacity=args.partition_capacity,
         routing='bloom_37x3', zero_route='admit', text_mode='full_text', minhash_values=112)
     identity = dict(kind='public_rad_jsonl_stream_v1', input_sha256=fingerprint(args.input), profile=profile)

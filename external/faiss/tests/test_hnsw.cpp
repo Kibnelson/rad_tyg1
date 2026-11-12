@@ -734,7 +734,7 @@ struct SinkHNSWFlat : faiss::IndexHNSWFlat {
     }
 };
 
-// Trains an IVF index with a SinkHNSWFlat quantizer and returns the recall@1
+
 // of the quantizer on vectors that training did not see.
 double ivf_quantizer_recall(
         int samples_per_list,
@@ -815,7 +815,7 @@ struct SinkBinaryHNSW : faiss::IndexBinaryHNSW {
 };
 
 // Trains an IndexBinaryIVF with a SinkBinaryHNSW quantizer and returns the
-// recall@1 of the quantizer on vectors that training did not see.
+
 double binary_ivf_quantizer_recall(int samples_per_node) {
     constexpr size_t nlist = 1024;
     const std::vector<uint8_t> nodes = random_codes(nlist, 1);

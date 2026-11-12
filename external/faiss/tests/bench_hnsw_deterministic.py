@@ -7,7 +7,7 @@
 #
 #   summary (default): build the index FAISS_DET_NBUILDS times, reporting build
 #     time (min/mean) + peak RSS, graph reproducibility (blake2b of
-#     neighbors+offsets across builds), and the recall/QPS tradeoff vs
+
 #     brute-force ground truth.
 #
 #   timing study (FAISS_DET_ROUNDS > 0): time the build FAISS_DET_ROUNDS times,
@@ -103,7 +103,7 @@ def dataset_paths(d: int, nb: int, nq: int, seed: int) -> tuple[str, str]:
 
 
 def make_dataset(d: int, nb: int, nq: int, seed: int):
-    # SyntheticDataset: a low-intrinsic-dimensional ellipsoid so recall is
+
     # meaningful; HNSWFlat needs no training (nt=0). Serialized once and
     # returned as a copy-on-write memmap so its pages stay file-backed (a build
     # still makes its own resident copy, but the source can be evicted under

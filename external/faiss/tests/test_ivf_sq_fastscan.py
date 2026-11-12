@@ -83,7 +83,7 @@ class TestIndexIVFSQFastScanBasic(unittest.TestCase):
 
 
 class TestIndexIVFSQFastScanRecall(unittest.TestCase):
-    """Recall parity tests against IndexIVFScalarQuantizer."""
+    ""
 
     def _compare_recall(self, qtype, nlist=16, nprobe=16):
         ds = SyntheticDataset(d=32, nt=2000, nb=2000, nq=50, seed=42)
@@ -116,7 +116,7 @@ class TestIndexIVFSQFastScanRecall(unittest.TestCase):
         test.nprobe = nprobe
         D_test, I_test = test.search(ds.get_queries(), k)
 
-        # Compute recalls
+
         recall_ref = np.mean([
             len(set(I_ref[i]) & set(I_gt[i])) / k
             for i in range(ds.nq)

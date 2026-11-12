@@ -98,7 +98,7 @@ void top1_add_results_avx512(
 /// that dominates the scalar path.
 ///
 /// Falls back to the scalar NONE path for small reservoirs (capacity < 32)
-/// where the compress-path setup cost outweighs its throughput benefit.
+
 template <class C, bool use_sel>
 void reservoir_add_results_avx512(
         ReservoirBlockResultHandler<C, use_sel>* self,

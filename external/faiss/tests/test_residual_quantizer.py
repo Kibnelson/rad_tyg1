@@ -493,7 +493,7 @@ class TestIndexResidualQuantizer(unittest.TestCase):
             rank: (I[:, :rank] == gt[:, :1]).sum() / len(gt)
             for rank in [1, 10, 100]
         }
-        # recalls are {1: 0.05, 10: 0.37, 100: 0.37}
+
         self.assertGreater(recalls[10], 0.35)
 
     def do_exact_search_equiv(self, norm_type):
