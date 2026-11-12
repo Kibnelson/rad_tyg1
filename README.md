@@ -20,10 +20,10 @@ accepted IDs and retained signatures. Each batch checks the complete retained
 reference before adding accepted documents.
 
 The native files and MinHash encoder are unchanged; [PROVENANCE.json](PROVENANCE.json)
-records their source revisions and hashes. The streaming runner checks every
+records their distributed file hashes. The streaming runner checks every
 document before insertion.
 
-Functional installation checks: [VALIDATION.md](VALIDATION.md).
+Installation self-checks: [CHECKS.md](CHECKS.md).
 
 [Machine sizes and CPU check](MACHINE_SPECS.md) cover the sample and larger runs.
 
@@ -32,4 +32,4 @@ at least 30 available logical CPUs (32 vCPUs recommended).
 
 For reproduction, use the same **GCP C3D high-memory machine: AMD Genoa,
 32 CPU cores and 480 GB RAM**, with **30 workers**. See the
-[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).
+[reference GCP configuration](MACHINE_SPECS.md#reference-gcp-setup).
