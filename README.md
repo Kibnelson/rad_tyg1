@@ -3,8 +3,6 @@
 This repository contains RAD and three comparison systems for removing
 near-duplicate text from a document stream. Each branch includes native source
 code, an installation runbook, a small test dataset and commands for larger inputs.
-The underlying native systems have been tested on GCP using the experiment
-runbooks; these public runbooks package the setup, sample and larger-data steps.
 
 RAD checks each incoming batch against documents already kept. It uses MinHash
 bitmap signatures, Bloom routing and a partitioned HNSW index. Accepted documents
@@ -43,7 +41,7 @@ the additional CPU instructions needed by each system.
 
 For reproduction, use the same **GCP C3D high-memory machine with AMD Genoa,
 32 CPU cores and 480 GB RAM**, with **30 workers** used for runs. See the
-[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).
+[reference GCP configuration](MACHINE_SPECS.md#reference-gcp-setup).
 
 ```bash
 sudo apt-get update
@@ -95,5 +93,5 @@ which records the source and file hash.
 - [RUNBOOK.md](RUNBOOK.md): links to each system's installation steps.
 - [DATASETS.md](DATASETS.md): sample data and download commands.
 - [MACHINE_SPECS.md](MACHINE_SPECS.md): machine sizes and CPU requirements.
-- [VALIDATION.md](VALIDATION.md): runbook and installation checks.
+- [CHECKS.md](CHECKS.md): commands to check your installation.
 - [NOTICE.md](NOTICE.md): source and data attribution.

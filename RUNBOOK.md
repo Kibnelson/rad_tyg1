@@ -1,7 +1,6 @@
 # Start with a system runbook
 
-The underlying native systems have been tested on GCP using the experiment
-runbooks. Open a public runbook below and follow its commands in order:
+Open a system runbook below and follow its commands in order:
 
 - [RAD](https://github.com/Kibnelson/rad_tyg1/blob/rad/RUNBOOK.md)
 - [Milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md)
