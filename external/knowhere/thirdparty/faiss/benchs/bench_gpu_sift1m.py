@@ -41,7 +41,7 @@ for lk in range(11):
     k = 1 << lk
     t, r = evaluate(index, xq, gt, k)
 
-    # the recall should be 1 at all times
+
     print("k=%d %.3f ms, R@1 %.4f" % (k, t, r[1]))
 
 

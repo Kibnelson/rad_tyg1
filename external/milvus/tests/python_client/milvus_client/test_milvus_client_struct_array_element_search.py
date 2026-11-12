@@ -182,16 +182,16 @@ def gt_match_search(
 
 
 def assert_result_ids_match(milvus_results, gt_results, recall_threshold=0.9, is_search=True, check_order=False):
-    """
-    Compare Milvus results against ground truth.
+    ""
 
-    Args:
-        milvus_results: Milvus search results (List[List[dict]]) or query results (List[dict])
-        gt_results: Ground truth - list of tuples (id, score, ...) or set of IDs
-        recall_threshold: Minimum fraction of GT IDs that must appear in results
-        is_search: True for search results (List[List[dict]]), False for query (List[dict])
-        check_order: If True, also verify top-1 ranking matches
-    """
+
+
+
+
+
+
+
+
     if is_search:
         milvus_ids = [hit["id"] for hit in milvus_results[0]]
     else:
@@ -204,7 +204,7 @@ def assert_result_ids_match(milvus_results, gt_results, recall_threshold=0.9, is
 
     milvus_id_set = set(milvus_ids)
 
-    # Check recall
+
     if len(gt_ids) > 0:
         overlap = milvus_id_set & gt_ids
         recall = len(overlap) / min(len(gt_ids), len(milvus_ids)) if milvus_ids else 0
@@ -247,13 +247,13 @@ def _assert_element_range_hits_ground_truth(
     low=None,
     high=None,
 ):
-    """
-    Verify every returned element-level range-search hit against inserted data.
+    ""
 
-    This intentionally checks returned-hit correctness rather than exact recall:
-    HNSW search is approximate, but any returned (row id, element offset, distance)
-    must be independently valid.
-    """
+
+
+
+
+
     assert len(results) == len(query_vectors), f"result nq={len(results)} != query nq={len(query_vectors)}"
     data_by_id = {row["id"]: row for row in data}
 
@@ -317,7 +317,7 @@ def _assert_no_missing_range_hits(results, expected_hits):
 
 
 def _assert_range_recall(hits, expected_hits, limit, recall_threshold=0.8, context="range search"):
-    """Assert ANN range-search results recall enough exact top candidates."""
+    ""
     expected_top = expected_hits[: min(limit, len(expected_hits))]
     assert expected_top, f"{context}: exact expected range candidates should not be empty"
 
@@ -333,14 +333,14 @@ def _assert_range_recall(hits, expected_hits, limit, recall_threshold=0.8, conte
 
 
 def _hnsw_search_params(**params):
-    """Compose HNSW search params with a recall-oriented ef value."""
+    ""
     merged = dict(HNSW_SEARCH_PARAMS)
     merged.update(params)
     return merged
 
 
 def _diskann_search_params(**params):
-    """Compose DISKANN search params with a recall-oriented search_list value."""
+    ""
     merged = {"search_list": 1000}
     merged.update(params)
     return merged
@@ -5958,12 +5958,12 @@ class TestMilvusClientStructArrayElementRangeSearch(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_range_search_diskann_recall(self):
-        """
-        target: DISKANN range search on struct array element-level vectors has acceptable recall
-        method: build DISKANN on structA[embedding], compute exact range candidates from inserted data,
-                then require at least 70% overlap with the expected top candidates
-        expected: returned hits are valid range hits and recall is not too low
-        """
+        ""
+
+
+
+
+
         client = self._client()
         collection_name = cf.gen_unique_str(f"{prefix}_range_diskann")
         data = self._setup_collection(
@@ -6426,7 +6426,7 @@ class TestMilvusClientStructArrayElementRangeSearch(TestMilvusClientV2Base):
             high=high,
         )
         _assert_range_recall(results[0], expected_hits, limit=400, context="COSINE mixed-segment range search")
-        # recall hits from both segments (may be weaker for growing due to serial scan)
+
         has_sealed = any(i < 3000 for i in ids)
         has_growing = any(i >= 3000 for i in ids)
         assert has_sealed or has_growing, "no hits from either segment"
@@ -6660,7 +6660,7 @@ class TestMilvusClientStructArrayElementSearchIterator(TestMilvusClientV2Base):
         # 4. element_filter correctness
         for hit in all_results:
             assert any(e["int_val"] >= 0 for e in hit["structA"]), f"row {hit['id']} has no element with int_val >= 0"
-        # 5. iterator's unique row ids vs one-shot search (wider one-shot to account for HNSW recall)
+
         oneshot, check = self.search(
             client,
             collection_name,
@@ -8402,7 +8402,7 @@ class TestMilvusClientStructArrayElementSearchNoFilter(TestMilvusClientV2Base):
         # Top-1 must match
         assert milvus_ids[0] == gt_ids[0], f"Top-1 mismatch: Milvus={milvus_ids[0]}, GT={gt_ids[0]}"
 
-        # At least 90% overlap in top-K (HNSW recall tolerance)
+
         overlap = len(set(milvus_ids) & set(gt_ids))
         recall = overlap / limit
         assert recall >= 0.9, f"Recall too low: {recall:.2f} ({overlap}/{limit})"
@@ -8775,11 +8775,11 @@ class TestMilvusClientStructArrayElementSearchNoFilter(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_element_search_group_by_pk_ground_truth(self):
-        """
-        target: verify group_by PK search ranking against ground truth
-        method: compare Milvus group_by PK results with brute-force best-element-per-row
-        expected: high recall overlap with ground truth
-        """
+        ""
+
+
+
+
         client = self.shared_client
         collection_name = self.shared_collection
         data = self.shared_data
@@ -8807,7 +8807,7 @@ class TestMilvusClientStructArrayElementSearchNoFilter(TestMilvusClientV2Base):
         # Top-1 must match
         assert milvus_ids[0] == gt_ids[0], f"Top-1 mismatch: Milvus={milvus_ids[0]}, GT={gt_ids[0]}"
 
-        # At least 90% recall
+
         overlap = len(set(milvus_ids) & set(gt_ids))
         recall = overlap / limit
         assert recall >= 0.9, f"Group-by PK recall too low: {recall:.2f} ({overlap}/{limit})"
@@ -8847,20 +8847,20 @@ class TestMilvusClientStructArrayElementSearchNoFilter(TestMilvusClientV2Base):
 
 
 class TestMilvusClientStructArrayIndexAccessSearch(TestMilvusClientV2Base):
-    """search() filter coverage for the same predicates verified by query in
-    TestMilvusClientStructArrayIndexAccess (PR #48987 + companion array ops).
+    ""
 
-    Verification strategy:
-    - normal_vector uses FLAT index -> brute-force, recall=1.0 (exact ID set
-      assertions are independent of ANN behavior).
-    - Controlled rows share the same normal_vector as the query vector so they
-      sit at COSINE=1.0 (top of the result list); inert background rows use
-      diverse seeds -> always lower similarity.
-    - limit is set well above the controlled row count, so all controlled
-      rows that pass the filter are guaranteed to be returned.
-    - Each case still has >= 3500 rows total: 3000 sealed + 500 growing inert
-      background, controlled rows split across both segments.
-    """
+
+
+
+
+
+
+
+
+
+
+
+
 
     SEARCH_VEC_SEED = 424242
     SEARCH_LIMIT = 200
@@ -8924,9 +8924,9 @@ class TestMilvusClientStructArrayIndexAccessSearch(TestMilvusClientV2Base):
         }
 
     def _setup_collection(self, client, collection_name, controlled_rows):
-        """3000 sealed inert + first half of controlled (sealed) +
-        500 growing inert + second half of controlled (growing).
-        normal_vector uses FLAT for recall=1.0."""
+        ""
+
+
         schema = self._create_schema(client)
         index_params = client.prepare_index_params()
         index_params.add_index(
@@ -9010,10 +9010,10 @@ class TestMilvusClientStructArrayIndexAccessSearch(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L0)
     def test_search_index_access_eq(self):
-        """
-        target: structA[i][sub_field] == X usable as search() filter, exact recall
-        expected: hits exactly == predicted ID set (FLAT recall=1.0)
-        """
+        ""
+
+
+
         client = self._client()
         collection_name = cf.gen_unique_str(f"{prefix}_idx_search_eq")
 

@@ -1317,7 +1317,7 @@ func TestPushConfigReplyReportsAppliedAndIgnoredKeys(t *testing.T) {
 // remainder was under rate*10000. The long-run ratio was right, but the ratio inside any
 // one heartbeat window -- the only unit the telemetry API reports -- was not: a window is
 // tens or hundreds of operations against a cycle of ten thousand, so windows came out
-// wholly sampled or wholly dropped. At 3 QPS that is minutes of full metrics followed by
+
 // three quarters of an hour reporting nothing while the client is plainly busy.
 func TestSamplingIsUniformWithinEveryWindow(t *testing.T) {
 	sampleN := func(m *ClientTelemetryManager, rate float64, n int) int {

@@ -87,7 +87,7 @@ def eval_and_plot(name, plot=True):
 
     if plot:
         data = np.array(data)
-        plt.plot(data[:, 0], data[:, 1], label=name)  # x - recall, y - qps
+        plt.plot(data[:, 0], data[:, 1], label=name)
 
 
 nlist = 128

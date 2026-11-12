@@ -191,7 +191,7 @@ int main() {
 
         ops.display();
 
-        // keep the first parameter that obtains > 0.5 1-recall@1
+
         for (int i = 0; i < ops.optimal_pts.size(); i++) {
             if (ops.optimal_pts[i].perf > 0.5) {
                 selected_params = ops.optimal_pts[i].key;

@@ -117,7 +117,7 @@ struct ScannerMixIn : FastScanCodeScanner {
         if constexpr (use_avx512_qbs) {
             // AMD Zen 4 / Zen 4c ("Bergamo", family 0x19) split 512-bit
             // ops over a 256-bit datapath, so the 512-bit QBS kernel yields no
-            // throughput gain but pays extra per-block LUT-assembly and
+
             // cross-lane reduction overhead (measured ~14% search regression
             // for PQ8x4fs / PQ16x4fs). Route those CPUs to the 256-bit (AVX2)
             // QBS kernel instead -- same output, no downside on Zen 4. This is

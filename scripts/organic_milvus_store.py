@@ -150,7 +150,7 @@ def create_store_class(native_module, capacity=CAPACITY):
             value=dict(kind='organic_milvus_retained_completion_v1',status='closed',policy=POLICY,
                 profile=dict(PROFILE),capacity=self.capacity,ntotal=self.ntotal,partitions=parts,
                 source_million_seals=False,
-                timing_scope='Native partition close receipts contain measured/retry seal timers. Caller measures finalization in full runtime, outside query QPS.')
+                timing_scope='Native partition close receipts contain seal timers. Caller records finalization in full runtime.')
             prepared=_prepared_tools()
             prepared._immutable(path,value)
             header['completion']='closed';self.save()

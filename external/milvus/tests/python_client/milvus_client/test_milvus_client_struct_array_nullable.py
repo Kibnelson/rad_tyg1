@@ -725,7 +725,7 @@ def assert_profile_vector_subfield_equal(
 
 
 def assert_ann_recall(actual_keys, expected_keys, minimum_recall=0.8):
-    """Assert ANN Top-K recall against exact ground truth without requiring a specific hit."""
+    ""
     expected_set = set(expected_keys)
     actual_set = set(actual_keys)
     assert expected_set

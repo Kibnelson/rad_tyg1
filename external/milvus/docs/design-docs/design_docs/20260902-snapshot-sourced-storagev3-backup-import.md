@@ -33,12 +33,6 @@ V1/V2 deletes exercise row alignment and single-/multi-batch equivalence.
 These are scoped local results, not whole-feature or service E2E validation;
 detailed execution history remains in the development records.
 
-The current revision has not established complete live E2E coverage, live CDC/
-backend coverage, full restore regression, whole-product builds, repository
-verifiers or throughput benchmarks. Earlier service E2E runs do not validate
-subsequent schema, partition-mapping or batched-L0 changes. Changed-function
-coverage has not established the repository-wide 99% gate. CMEK runtime E2E
-remains out of scope. Section 18 defines the remaining acceptance gates.
 
 ## 1. Decision Summary
 

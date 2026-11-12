@@ -3017,12 +3017,12 @@ class TestImport2PCInfraDependent(Import2PCInfraBase):
                     os.remove(file_path)
 
     def test_import_2pc_throughput_baseline_records_import_index_commit_latency(self):
-        """
-        target: record Import 2PC throughput and phase latency baseline on a real instance
-        method: import IMPORT_2PC_PERF_ROWS rows with auto_commit=false and record create->Uncommitted,
-                commit->Completed, commit->query-visible, and total elapsed durations
-        expected: job completes, all rows become visible, and timing metrics are emitted to a JSON result file
-        """
+        ""
+
+
+
+
+
         row_count = int(os.environ.get("IMPORT_2PC_PERF_ROWS", "5000"))
         assert row_count > 0, "IMPORT_2PC_PERF_ROWS must be positive"
         result_path = os.environ.get(

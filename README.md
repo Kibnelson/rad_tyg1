@@ -12,15 +12,14 @@ the original private repository is required.
 
 **Full native server and sample-run validation is still pending.** See
 [VALIDATION.md](VALIDATION.md) for the checks completed so far. The included
-sample tests installation and document handling; it does not reproduce paper
-scores.
+sample tests installation and document handling.
 
 ## Settings
 
 Each document uses 112 uint32 MinHash values, grouped into 14 bands of eight.
 The search returns up to four candidates in order; any native LSH match causes
 the incoming document to be dropped. These are approximate matches. Returned
-scores are placeholders, and exact Jaccard and recall are not measured.
+scores are placeholders.
 
 Partitions fill sequentially with at most 1M **retained** documents each.
 Reading one million input documents does not necessarily fill a partition,
@@ -32,12 +31,12 @@ For the small sample, the local profile lowers
 This lets tiny segments receive a native LSH index; the 14×8 LSH settings and
 retained-document capacity are unchanged.
 
-## Results and timing
+## Saved files
 
 | File | Contents |
 |---|---|
-| `SUMMARY.json` | Final counts, pooled processing throughput and full local wall time |
-| `batches.csv` | Counts, stage times and throughput for each batch |
+| `SUMMARY.json` | Final counters and timing fields |
+| `batches.csv` | Counters and stage times for each batch |
 | `raw/batch_*.jsonl` | Ordered top4 search candidates and insertion decisions |
 
 Processing time includes MinHash, in-batch deduplication, native search,
@@ -45,7 +44,6 @@ admission and append/readiness. Creating a native owner during append is
 included in insert time. Input iteration, result-file writes, store setup,
 final partial-partition sealing and shutdown are outside processing time and
 inside full local wall time. Build and download time are outside both.
-Processing throughput is screened documents divided by summed processing time.
 
 The result files preserve zero-based stream positions and the input `id` values
 (as `source_id`); they do not copy input text. The download keeps any

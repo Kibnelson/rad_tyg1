@@ -81,12 +81,8 @@ res = client.search(
 
 Milvus is designed to handle vector search at scale. It stores vectors, which are learned representations of unstructured data, together with other scalar data types such as integers, strings, and JSON objects. Users can conduct efficient vector search with metadata filtering or hybrid search. Here are why developers choose Milvus as the vector database for AI applications:
 
-**High Performance at Scale and High Availability**  
-  * Milvus features a [distributed architecture](https://milvus.io/docs/architecture_overview.md ) that separates [compute](https://milvus.io/docs/data_processing.md#Data-query) and [storage](https://milvus.io/docs/data_processing.md#Data-insertion). Milvus can horizontally scale and adapt to diverse traffic patterns, achieving optimal performance by independently increasing query nodes for read-heavy workload and data node for write-heavy workload. The stateless microservices on K8s allow [quick recovery](https://milvus.io/docs/coordinator_ha.md#Coordinator-HA) from failure, ensuring high availability. The support for [replicas](https://milvus.io/docs/replica.md) further enhances fault tolerance and throughput by loading data segments on multiple query nodes. See [benchmark](https://zilliz.com/vector-database-benchmark-tool) for performance comparison.
 
 
-**Support for Various Vector Index Types and Hardware Acceleration**  
-  * Milvus separates the system and core vector search engine, allowing it to support all major vector index types that are optimized for different scenarios, including HNSW, IVF, FLAT (brute-force), SCANN, and DiskANN, with [quantization-based](https://milvus.io/docs/index.md?tab=floating#IVFPQ) variations and [mmap](https://milvus.io/docs/mmap.md). Milvus optimizes vector search for advanced features such as [metadata filtering](https://milvus.io/docs/scalar_index.md#Scalar-Index) and [range search](https://milvus.io/docs/single-vector-search.md#Range-search). Additionally, Milvus implements hardware acceleration to enhance vector search performance and supports GPU indexing, such as NVIDIA's [CAGRA](https://github.com/rapidsai/cuvs).
 
 
 **Flexible Multi-tenancy and Hot/Cold Storage**

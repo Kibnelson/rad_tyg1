@@ -45,7 +45,7 @@ type CollectionMetricsPayload struct {
 	Collections []string `json:"collections"`
 	// Enabled: true to enable, false to disable fine-grained metrics
 	Enabled bool `json:"enabled"`
-	// MetricsTypes: optional list of metric types to collect (e.g., latency, qps)
+
 	MetricsTypes []string `json:"metrics_types,omitempty"`
 }
 

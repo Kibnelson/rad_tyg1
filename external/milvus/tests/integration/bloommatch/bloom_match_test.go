@@ -496,7 +496,7 @@ func resultPKs(res *milvuspb.SearchResults) []int64 {
 
 // query runs a scalar filter query (no vector search / ANN). It returns ALL rows
 // matching expr up to a high limit, so correctness assertions built on it are
-// deterministic — free of ANN recall and topK-nearest displacement. Strong
+
 // consistency guarantees just-inserted (unflushed, growing) rows are visible.
 func (s *BloomMatchTestSuite) query(collectionName, expr string, outputFields []string, tmpl map[string]*schemapb.TemplateValue) *milvuspb.QueryResults {
 	res, err := s.Cluster.MilvusClient.Query(context.Background(), &milvuspb.QueryRequest{
@@ -541,7 +541,7 @@ func int64Set(vals []int64) map[int64]struct{} {
 // TestQueryIncludeZeroFalseNegatives is the hard correctness gate: using a scalar
 // QUERY (no vector search), the set of rows bloom_match returns must be a SUPERSET of
 // the rows exact `in` returns — every true member passes bloom_match. Because query has
-// no ANN recall and no topK-nearest truncation, this deterministically proves zero row-
+
 // level false negatives (a member being dropped would be a bug, not an ANN artifact).
 func (s *BloomMatchTestSuite) TestQueryIncludeZeroFalseNegatives() {
 	collectionName := "test_bloom_match_qincl_" + funcutil.GenRandomStr()
@@ -814,12 +814,12 @@ func (s *BloomMatchTestSuite) TestQueryJsonPathIndexTypeMatrix() {
 	}
 }
 
-// TestSearchRecallWithinThreshold exercises the ANN path (IVF index): a filtered vector
-// search with bloom_match should recall almost all of the members that the exact `in`
+
+
 // filtered search returns for the same query vector. Because these are APPROXIMATE searches
 // (differing filter selectivity → different index traversal, plus topK-nearest
 // displacement by false positives), an exact superset is NOT guaranteed here, so we
-// assert a recall threshold rather than zero misses. The deterministic zero-false-
+
 // negative guarantee lives in the query-based test above.
 func (s *BloomMatchTestSuite) TestSearchRecallWithinThreshold() {
 	collectionName := "test_bloom_match_recall_" + funcutil.GenRandomStr()
@@ -828,7 +828,7 @@ func (s *BloomMatchTestSuite) TestSearchRecallWithinThreshold() {
 	memberSet := []int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
 	lit := int64LiteralList(memberSet)
 	blob := s.bloomBlobInt64(memberSet)
-	topK := s.rowNum // large topK to minimize truncation; remaining diff is ANN recall
+	topK := s.rowNum
 
 	params := integration.GetSearchParams(integration.IndexFaissIvfFlat, metric.L2)
 	exactReq := integration.ConstructSearchRequest(s.dbName, collectionName,
@@ -1008,7 +1008,7 @@ func (s *BloomMatchTestSuite) TestBlobArgAndErrors() {
 	// A blob built from the wrong value domain is rejected at the proxy rather than
 	// executed. Both directions matter: the probe would never alias across domains,
 	// so without this gate the query would succeed and just return fewer rows — the
-	// silent recall loss this check exists to prevent. The realistic trigger is IDs
+
 	// stringified by a JSON/JS layer and shipped against an INT64 field.
 	strBlobOnInt := s.bloomBlobStr([]string{"0", "1", "2"})
 	badDomain := s.search(collectionName, fmt.Sprintf("membership_match(%s, {bf}, type=bloom)", creatorIDField), 10, nil, bfParam(strBlobOnInt))

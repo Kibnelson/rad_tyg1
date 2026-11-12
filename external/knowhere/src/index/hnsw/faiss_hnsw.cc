@@ -2897,7 +2897,7 @@ class BaseFaissRegularIndexHNSWPQNode : public BaseFaissRegularIndexHNSWNode {
         // create an index
         const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
 
-        // HNSW + PQ index yields BAD recall somewhy.
+
         // Let's build HNSW+FLAT index, then replace FLAT with PQ
         auto train_index = [&](const float* data, const int i, const int64_t rows) {
             std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> hnsw_index;
@@ -3479,7 +3479,7 @@ class BaseFaissRegularIndexHNSWPRQNode : public BaseFaissRegularIndexHNSWNode {
         // create an index
         const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
 
-        // HNSW + PRQ index yields BAD recall somewhy.
+
         // Let's build HNSW+FLAT index, then replace FLAT with PRQ
         auto train_index = [&](const float* data, const int i, const int64_t rows) {
             std::unique_ptr<faiss::cppcontrib::knowhere::IndexHNSW> hnsw_index;

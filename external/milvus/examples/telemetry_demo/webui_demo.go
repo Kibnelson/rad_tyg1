@@ -295,8 +295,8 @@ func main() {
 	fmt.Println("Press Ctrl+C to exit (client will keep sending heartbeats)...")
 	fmt.Println()
 
-	// Keep alive for WebUI viewing - send 10 requests per second for visible QPS
-	ticker := time.NewTicker(100 * time.Millisecond) // 10 QPS
+
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	requestCount := 0
 	for range ticker.C {

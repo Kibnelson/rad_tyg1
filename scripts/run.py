@@ -66,7 +66,7 @@ def main():
     config=dict(input=str(a.input.resolve()),threads=a.threads,cpus=cpus,
         batch_size=a.batch_size,partition_capacity=a.partition_capacity,topk=4,
         signature_length=112,bands=14,rows_per_band=8,admission='any native LSH candidate',
-        exact_jaccard=False,recall_measured=False,text_mode='full_text',
+        exact_jaccard=False,text_mode='full_text',
         sketch_fingerprint=spec.fingerprint())
     (output/'config.json').write_text(json.dumps(config,indent=2)+'\n')
     columns=['batch','screened','inserted','index_search_drops','in_batch_dedup_drops',

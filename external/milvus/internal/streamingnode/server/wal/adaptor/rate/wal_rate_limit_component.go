@@ -85,7 +85,7 @@ func (c *WALRateLimitComponent) RegisterMemoryObserver() {
 	c.handler = l
 }
 
-// hardwareCallback is the callback function for the hardware metrics listener.
+
 func (c *WALRateLimitComponent) hardwareCallback(sm hardware.SystemMetrics, _ *hardware.SystemMetricsListener) {
 	slowdownThreshold := paramtable.Get().StreamingCfg.WALRateLimitNodeMemorySlowdownThreshold.GetAsFloat()
 	recoverThreshold := paramtable.Get().StreamingCfg.WALRateLimitNodeMemoryRecoverThreshold.GetAsFloat()

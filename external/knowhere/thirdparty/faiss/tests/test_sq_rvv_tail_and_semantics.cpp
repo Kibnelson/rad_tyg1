@@ -5,51 +5,51 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-/*
- *
- * SQ-RVV review-response tests (see
- * docs/sq_rvv_review_analysis_and_test_plan.md for the full analysis):
- *
- *   D1  CounterexampleRegression — uniform L2 half-grid semantics (the
- *       review's literal q == recon(c) counterexample)
- *   D2  TailBoundaryParity      — d past VLMAX so the tail pass runs
- *       (may pass on well-behaved hardware; regression + VLEN sensitivity)
- *   D3  DirectBitExact          — in-contract integer data => exactly equal
- *   D5  OverflowGuard           — large-d float-domain parity for the direct
- *       codecs (the kernels accumulate in f32; f32 saturates near 3.4e38,
- *       so there is no integer-wraparound failure mode to guard)
- *   D5b LargeDimParity          — large-d direct-codec parity vs the exact
- *       double reference (regression net for the old per-lane i32/u32
- *       wraparound and the signed-IP query-bias overflow, both gone now
- *       that the kernels are float-domain)
- *   D6  ZeroDim                 — d == 0 must return 0, not hang; each case
- *       runs in a forked child under alarm() so a hang only fails its own
- *       case (POSIX only; skipped on Windows hosts)
- *   D7  SpecialQueries          — clamp boundaries / systematic-value
- *       queries / huge-but-finite magnitudes
- *   D8  SmallDimensionParity    — odd & very small d (1/2/3/5/7) across every
- *       qtype x metric (packing tail: 4-bit odd-d padding, 6-bit ng==0)
- *   D9  ReconQuery              — q == recon(code) => L2 distance ~ 0, for
- *       every qtype (not just uniform)
- *   D10 FloatQueryParity        — direct codecs retain FLOAT-query
- *       semantics: fractional queries must match the scalar NONE
- *       reference (the review's literal q=0.75 counterexample; an
- *       earlier integer-domain kernel truncated the query and ranked
- *       candidates differently)
- *
- * Expected status against the CURRENT sq-rvv.cpp (all codecs, direct
- * included, are float-domain in the query):
- *   D1: PASS (uniform L2/IP float-domain semantics)
- *   D2: PASS expected on board
- *   D3: PASS expected (in-contract integer data keeps f32 sums exact)
- *   D5: PASS (float-domain, no wraparound)
- *   D5b: PASS (float-domain, no wraparound / bias overflow)
- *   D6: PASS (all kernels guard vsetvl(0) with `d > 0 ? d : 1`)
- *   D7: PASS (exact float-domain)
- *   D8: PASS expected
- *   D9: PASS expected
- *   D10: PASS (float-query semantics retained)
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <gtest/gtest.h>
 

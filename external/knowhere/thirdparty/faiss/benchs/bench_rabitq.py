@@ -35,9 +35,9 @@ qb: int = 8
 # samples is enough to flag whether differences across dimensions are
 # noise or real, while keeping the bench cheap.
 ITERATIONS: int = 3
-# This will contain <"index name", ([recalls],[speeds],[labels (the k)])>
+
 recall_speed_data = defaultdict(lambda: [[], [], []])
-# This will contain <"index name", ([recalls],[memory for this index])>
+
 recall_memory_data = defaultdict(lambda: [[], []])
 
 # Set when entering each per-d block below; used by helpers that close
@@ -254,7 +254,7 @@ for M in [4, 6, 8]:
 """:py '1347502839702520'"""
 # IndexIVFScalarQuantizer
 
-for M in [4, 6]:  # 8 seems to have no recall improvement in this dataset.
+for M in [4, 6]:
     fac_s = f"IVF{nlist},SQ{M}"
     sq = create_index(ds, fac_s)
     mem = sq.code_size * sq.ntotal
@@ -344,7 +344,7 @@ for i, (key, vals) in enumerate(recall_speed_data.items()):
     # Adding k and nprobe labels makes the diagram very busy, but can be enabled by uncommenting the following lines:
     # ks = vals[2]
     # texts = []
-    # for i, (x_val, y_val) in enumerate(zip(recalls, speeds)):
+
     #     texts.append(plt.text(x_val, y_val, ks[i]))
     # # Adjust text labels
     # adjust_text(

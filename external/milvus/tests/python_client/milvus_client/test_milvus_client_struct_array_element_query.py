@@ -1115,7 +1115,7 @@ class TestMilvusClientStructArrayElementSTLSortIndex(TestMilvusClientV2Base):
         assert check
         assert len(results) > 0
 
-        # Verify all results satisfy the filter (correctness, not recall)
+
         for hit in results[0]:
             assert any(e["int_val"] > 200 for e in hit["structA"]), f"Row {hit['id']}: no element with int_val > 200"
 

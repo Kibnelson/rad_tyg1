@@ -11,7 +11,6 @@ Milvus currently supports full-text search for English, Chinese (Jieba), and a s
 - **Arabic**: Right-to-left script with diacritical marks (harakat), letter-form variations (hamza variants, teh marbuta, alef maksura), decorative stretching (tatweel/kashida), and its own digit system (Arabic-Indic numerals ٠-٩).
 - **Thai**: No whitespace between words — word boundaries must be determined by a segmentation model (LSTM-based ICU4X WordSegmenter).
 
-Without dedicated support, Arabic text search produces poor recall (diacritics and letter variants cause mismatches), and Thai text cannot be tokenized at all by whitespace-based tokenizers.
 
 ## Design
 

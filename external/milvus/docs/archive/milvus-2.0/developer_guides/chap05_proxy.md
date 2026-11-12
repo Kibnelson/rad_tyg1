@@ -571,9 +571,7 @@ func NewTaskScheduler(ctx context.Context, idAllocator *allocator.IDAllocator, t
 
 _scheduleDdTask()_ selects tasks in a FIFO manner, thus time order is guaranteed.
 
-The policy of _scheduleDmTask()_ should target on throughput, not tasks' time order. Note that the time order of the tasks' execution will later be guaranteed by the timestamp & time tick mechanism.
 
-The policy of _scheduleDqTask()_ should target on throughput. It should also take visibility into consideration. For example, if an insert task and a query arrive in a same time tick and the query comes after insert, the query should be scheduled in the next tick thus the query can see the insert.
 
 _TaskDoneTest(ts Timestamp)_ will check all the three task queues. If no task is found before _ts_, then the function returns _true_, which indicates that all the tasks before _ts_ are completed.
 

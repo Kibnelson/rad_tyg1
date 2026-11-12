@@ -408,7 +408,7 @@ var (
 		}, []string{nodeIDLabelName, "type"})
 
 	// DataNodeImportV3ReshardRows counts the rows one reshard run hashes, so
-	// reshard throughput in rows is readable from rate(). It is node-level only:
+
 	// a per-task or per-file label would be unbounded.
 	DataNodeImportV3ReshardRows = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

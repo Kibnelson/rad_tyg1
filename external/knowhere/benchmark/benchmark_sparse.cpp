@@ -415,7 +415,7 @@ WritePareto(const std::string& output, const std::vector<ParetoPoint>& points) {
     }
 }
 
-// ID recall deliberately exposes ties and FP16 rounding relative to FP32 ground truth.
+
 double
 Recall(const knowhere::DataSetPtr& result, const Truth& truth, size_t nq, int k, size_t nb) {
     size_t hits = 0, total = 0;

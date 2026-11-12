@@ -16,11 +16,6 @@ Header-only C++ HNSW implementation with python bindings.
 * Thanks to ([@psobot](https://github.com/psobot)) there is now a sencible message instead of segfault when passing a scalar to get_items.
 * Thanks to ([@urigoren](https://github.com/urigoren)) hnswlib has a lazy index creation python wrapper.
 
-**version 0.6.0** 
-* Thanks to ([@dyashuni](https://github.com/dyashuni)) hnswlib now uses github actions for CI, there is a search speedup in some scenarios with deletions. `unmark_deleted(label)` is now also a part of the python interface (note now it throws an exception for double deletions). 
-* Thanks to ([@slice4e](https://github.com/slice4e)) we now support AVX512; thanks to ([@LTLA](https://github.com/LTLA)) the cmake interface for the lib is now updated. 
-* Thanks to ([@alonre24](https://github.com/alonre24)) we now have a python bindings for brute-force (and examples for recall tuning: [TESTING_RECALL.md](TESTING_RECALL.md). 
-* Thanks to ([@dorosy-yeong](https://github.com/dorosy-yeong)) there is a bug fixed in the handling large quantities of deleted elements and large K. 
 
   
 
@@ -118,113 +113,8 @@ Properties of `hnswlib.Index` that support reading and writing:
         
   
 #### Python bindings examples
-```python
-import hnswlib
-import numpy as np
-import pickle
-
-dim = 128
-num_elements = 10000
-
-# Generating sample data
-data = np.float32(np.random.random((num_elements, dim)))
-ids = np.arange(num_elements)
-
-# Declaring index
-p = hnswlib.Index(space = 'l2', dim = dim) # possible options are l2, cosine or ip
-
-# Initializing index - the maximum number of elements should be known beforehand
-p.init_index(max_elements = num_elements, ef_construction = 200, M = 16)
-
-# Element insertion (can be called several times):
-p.add_items(data, ids)
-
-# Controlling the recall by setting ef:
-p.set_ef(50) # ef should always be > k
-
-# Query dataset, k - number of closest elements (returns 2 numpy arrays)
-labels, distances = p.knn_query(data, k = 1)
-
-# Index objects support pickling
-# WARNING: serialization via pickle.dumps(p) or p.__getstate__() is NOT thread-safe with p.add_items method!
-# Note: ef parameter is included in serialization; random number generator is initialized with random_seed on Index load
-p_copy = pickle.loads(pickle.dumps(p)) # creates a copy of index p using pickle round-trip
-
-### Index parameters are exposed as class properties:
-print(f"Parameters passed to constructor:  space={p_copy.space}, dim={p_copy.dim}") 
-print(f"Index construction: M={p_copy.M}, ef_construction={p_copy.ef_construction}")
-print(f"Index size is {p_copy.element_count} and index capacity is {p_copy.max_elements}")
-print(f"Search speed/quality trade-off parameter: ef={p_copy.ef}")
-
-```
 
 An example with updates after serialization/deserialization:
-```python
-import hnswlib
-import numpy as np
-
-dim = 16
-num_elements = 10000
-
-# Generating sample data
-data = np.float32(np.random.random((num_elements, dim)))
-
-# We split the data in two batches:
-data1 = data[:num_elements // 2]
-data2 = data[num_elements // 2:]
-
-# Declaring index
-p = hnswlib.Index(space='l2', dim=dim)  # possible options are l2, cosine or ip
-
-# Initializing index
-# max_elements - the maximum number of elements (capacity). Will throw an exception if exceeded
-# during insertion of an element.
-# The capacity can be increased by saving/loading the index, see below.
-#
-# ef_construction - controls index search speed/build speed tradeoff
-#
-# M - is tightly connected with internal dimensionality of the data. Strongly affects memory consumption (~M)
-# Higher M leads to higher accuracy/run_time at fixed ef/efConstruction
-
-p.init_index(max_elements=num_elements//2, ef_construction=100, M=16)
-
-# Controlling the recall by setting ef:
-# higher ef leads to better accuracy, but slower search
-p.set_ef(10)
-
-# Set number of threads used during batch search/construction
-# By default using all available cores
-p.set_num_threads(4)
-
-
-print("Adding first batch of %d elements" % (len(data1)))
-p.add_items(data1)
-
-# Query the elements for themselves and measure recall:
-labels, distances = p.knn_query(data1, k=1)
-print("Recall for the first batch:", np.mean(labels.reshape(-1) == np.arange(len(data1))), "\n")
-
-# Serializing and deleting the index:
-index_path='first_half.bin'
-print("Saving index to '%s'" % index_path)
-p.save_index("first_half.bin")
-del p
-
-# Re-initializing, loading the index
-p = hnswlib.Index(space='l2', dim=dim)  # the space can be changed - keeps the data, alters the distance function.
-
-print("\nLoading index from 'first_half.bin'\n")
-
-# Increase the total capacity (max_elements), so that it will handle the new data
-p.load_index("first_half.bin", max_elements = num_elements)
-
-print("Adding the second batch of %d elements" % (len(data2)))
-p.add_items(data2)
-
-# Query the elements for themselves and measure recall:
-labels, distances = p.knn_query(data, k=1)
-print("Recall for two batches:", np.mean(labels.reshape(-1) == np.arange(len(data))), "\n")
-```
 
 ### Bindings installation
 

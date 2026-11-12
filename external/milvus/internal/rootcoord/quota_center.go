@@ -122,8 +122,8 @@ type LimiterRange struct {
 // notifies Proxies to limit rate of requests from clients or reject
 // all requests when the cluster met resources issues.
 // Limitations:
-//  1. DML throughput limitation;
-//  2. DDL, DQL qps/rps limitation;
+
+
 //
 // Protections:
 //  1. TT protection -> 				dqlRate = maxDQLRate * (maxDelay - ttDelay) / maxDelay

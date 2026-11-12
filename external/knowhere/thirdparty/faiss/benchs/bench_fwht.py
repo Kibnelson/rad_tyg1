@@ -3,12 +3,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Benchmark HadamardRotation (HD3 FWHT) vs RandomRotationMatrix (BLAS sgemm).
+""
 
-Measures:
-  1. Speed: wall-clock time for transform.apply(x)
-  2. Recall@1: nearest-neighbor recall after pre-transform + Flat index
-"""
+
+
+
+
 
 import faiss
 import numpy as np
@@ -54,7 +54,7 @@ for d in dims:
     speedup = rr_ms / hr_ms
     print(f"{d:6d}  {hr_ms:10.2f}  {rr_ms:10.2f}  {speedup:7.1f}x")
 
-# --- Recall benchmark with IVF (where rotation actually matters) ---
+
 print(f"\n=== Recall@1 with IVF (L2, n={n}, nq={nq}, k=1) ===")
 print(f'{"dim":>6s}  {"HR R@1":>8s}  {"RRM R@1":>8s}  {"none R@1":>8s}')
 print("-" * 40)

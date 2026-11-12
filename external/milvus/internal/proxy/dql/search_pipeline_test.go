@@ -4871,7 +4871,7 @@ func (s *SearchPipelineSuite) TestReorderResultsIndexOutOfBounds() {
 		Ids: longIDs(), Distances: []float32{0.1},
 	}}, oob), "distances")
 
-	// recalls
+
 	s.Error(op.reorderResults(&milvuspb.SearchResults{Results: &schemapb.SearchResultData{
 		Ids: longIDs(), Recalls: []float32{0.1},
 	}}, oob), "recalls")

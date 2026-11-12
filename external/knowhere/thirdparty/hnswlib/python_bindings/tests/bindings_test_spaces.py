@@ -31,7 +31,7 @@ class RandomSelfTestCase(unittest.TestCase):
 
                     p.add_items(data2)
 
-                    # Query the elements for themselves and measure recall:
+
                     labels, distances = p.knn_query(np.asarray(data2[-1:]), k=5)
 
                     

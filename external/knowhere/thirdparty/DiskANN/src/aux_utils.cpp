@@ -129,7 +129,7 @@ namespace diskann {
 
       gt.insert(gt_vec, gt_vec + tie_breaker);
       res.insert(res_vec,
-                 res_vec + recall_at);  // change to recall_at for recall k@k or
+                 res_vec + recall_at);
                                         // dim_or for k@dim_or
       unsigned cur_recall = 0;
       for (auto &v : gt) {
@@ -869,7 +869,7 @@ namespace diskann {
 
   // General purpose support for DiskANN interface
 
-  // optimizes the beamwidth to maximize QPS for a given L_search subject to
+
   // 99.9 latency not blowing up
   template<typename T>
   uint32_t optimize_beamwidth(

@@ -179,7 +179,7 @@ struct FAISS_API SIMDConfig {
 
     /// CPU implements AVX-512 by splitting over a 256-bit datapath
     /// (AMD Zen 4 / Zen 4c "Bergamo", family 0x19). On such CPUs 512-bit
-    /// ops give no throughput gain, so the fast-scan QBS path prefers the
+
     /// 256-bit kernel.
     static bool avx512_split;
 

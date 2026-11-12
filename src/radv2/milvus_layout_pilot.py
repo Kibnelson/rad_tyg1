@@ -165,7 +165,9 @@ def wait_layout(client,collection,expected,timeout,*,live_observer=None,timing=N
 
 
 class Searcher:
-    def __init__(self,clients,collection,parallel,topk=32,refine_k=160,refined=True):
+    def __init__(self,clients,collection,parallel,topk=4,refine_k=160,refined=True):
+        if type(topk) is not int or topk != 4:
+            raise ValueError('Public Milvus search requires topk=4')
         self.clients,self.collection,self.parallel=clients,collection,parallel
         self.topk,self.refine_k=topk,refine_k
         self.refined=refined
@@ -212,7 +214,7 @@ def warmup_search(searcher,data,timeout,processes,report):
     """Wait for a successful complete search before entering measured batches.
 
     Loaded physical index metadata does not establish a serviceable query view.
-    Keep all attempts outside QPS and retain them in a separate evidence file.
+    Retain readiness attempts in a separate evidence file.
     """
     if not data or not math.isfinite(timeout) or timeout<=0:
         raise ValueError('Use nonempty warmup queries and a finite positive readiness timeout')

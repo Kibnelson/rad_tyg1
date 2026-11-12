@@ -3336,7 +3336,7 @@ class TestFunctionChain(TestMilvusClientV2Base):
             )
             .sort(col("$score"), desc=True, tie_break_col=col("$id"))
             # L1 limits are worker-local. Keep all flushed candidates so
-            # segment placement/handoff cannot change expected global recall;
+
             # the growing-only direct case exercises the smaller L1 budget.
             .limit(2 if partition_mode else 3)
         )

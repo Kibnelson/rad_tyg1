@@ -126,7 +126,7 @@ func (c *Client) handleSearchResult(schema *entity.Schema, outputFields []string
 			}
 			entry.Scores = results.GetScores()[offset : offset+rc]
 
-			// set recall if returned
+
 			if i < len(results.Recalls) {
 				entry.Recall = results.Recalls[i]
 			}

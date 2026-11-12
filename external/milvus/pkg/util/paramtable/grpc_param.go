@@ -77,13 +77,13 @@ const (
 	// the pools are sized multiplier x GOMAXPROCS, so this only rejects a
 	// mistyped config, and a large host still scales past it. Compression is
 	// CPU-bound and runs inline on the gRPC goroutine, so more than a few times
-	// the core count buys queueing rather than throughput, while every extra
+
 	// slot is a zstd encoder state (~3.6MB at the default level) plus a codec
 	// writer and reader.
 	MaxCompressionConcurrency = 8
 
 	// DefaultCompressionCRC controls whether the zstd encoder embeds a
-	// per-frame checksum. It defaults to false: the checksum costs throughput on
+
 	// every message, while corruption on an internal TCP link is already caught
 	// by the TCP checksum and, in practice, by zstd's own entropy decoding, which
 	// rejects a damaged frame rather than returning garbage. Turn it on where a

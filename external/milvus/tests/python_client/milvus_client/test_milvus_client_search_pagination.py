@@ -209,26 +209,26 @@ class TestMilvusClientSearchPagination(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L0)
     def test_search_bfloat16_with_pagination_default(self):
-        """
-        target: test search bfloat16 vectors with pagination
-        method: 1. connect and create a collection
-                2. search bfloat16 vectors with pagination (with explicit search_list_size)
-                3. search a full reference (same search_list_size) without pagination
-                4. compare: per-page overlap >= 90%, and overall recall across all pages >= 95%
-        expected: search successfully and ids are consistent
+        ""
 
-        Note on DISKANN pagination consistency:
-            When offset is set, Milvus internally searches with topk = limit + offset.
-            Without an explicit search_list_size, DISKANN uses a search depth proportional
-            to topk — so paginated searches (e.g. topk=200 for page 1) explore far fewer
-            graph nodes than the full search (topk=1000). This causes boundary candidates
-            (those at the edge of each page) to differ between calls, producing ~76-79%
-            overlap and flaky failures against an 80% threshold.
 
-            Fix: pin search_list_size=1200 on both paginated and full searches so both
-            explore the same set of candidate neighbours. Per-page overlap then rises
-            to ~95%+ and overall recall across all pages reaches ~99%+.
-        """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         client = self._client()
         # 1. Create collection with schema
         collection_name = self.collection_name
@@ -286,7 +286,7 @@ class TestMilvusClientSearchPagination(TestMilvusClientV2Base):
                     f"bfloat16 pagination per-page overlap too low: {overlap_ratio}% (page={p}, nq={i})"
                 all_page_ids.update(page_ids)
 
-            # Overall recall: union of all paginated results vs full search
+
             full_ids = {search_res_full[i][j].get('id') for j in range(limit * pages)}
             overall_recall = len(all_page_ids & full_ids) / len(full_ids) * 100
             log.debug(f"nq[{i}], overall recall: {overall_recall:.1f}%")

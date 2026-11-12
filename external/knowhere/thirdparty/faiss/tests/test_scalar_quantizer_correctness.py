@@ -421,7 +421,7 @@ class TestTurboQFullEncodeDecode(unittest.TestCase):
 
 
 class TestTurboQFullSearch(unittest.TestCase):
-    """Search recall tests for TurboQ full types."""
+    ""
 
     def setUp(self):
         self.d = 64

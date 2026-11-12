@@ -255,7 +255,7 @@ func (_c *MockGrpcClient_GetRole_Call[T]) RunAndReturn(run func() string) *MockG
 	return _c
 }
 
-// ReCall provides a mock function with given fields: ctx, caller
+
 func (_m *MockGrpcClient[T]) ReCall(ctx context.Context, caller func(T) (interface{}, error)) (interface{}, error) {
 	ret := _m.Called(ctx, caller)
 
@@ -285,12 +285,12 @@ func (_m *MockGrpcClient[T]) ReCall(ctx context.Context, caller func(T) (interfa
 	return r0, r1
 }
 
-// MockGrpcClient_ReCall_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReCall'
+
 type MockGrpcClient_ReCall_Call[T grpcclient.GrpcComponent] struct {
 	*mock.Call
 }
 
-// ReCall is a helper method to define mock.On call
+
 //   - ctx context.Context
 //   - caller func(T)(interface{} , error)
 func (_e *MockGrpcClient_Expecter[T]) ReCall(ctx interface{}, caller interface{}) *MockGrpcClient_ReCall_Call[T] {

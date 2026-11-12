@@ -2137,14 +2137,14 @@ class TestSearchV2Shared(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_search_with_expression(self):
-        """
-        target: verify filter expressions return only matching results and templates produce equivalent results
-        method: 1. search with each expression from gen_normal_expressions_and_templates
-                2. compute expected filter_ids locally using eval
-                3. verify returned IDs match filter_ids exactly (FLAT index, 100% recall)
-                4. repeat with expression template and with iterative_filter hint
-        expected: exact ID match for FLAT index, distances in descending order (COSINE)
-        """
+        ""
+
+
+
+
+
+
+
         nb = self.shared_nb
         dim = self.shared_dim
         client = self._client(alias=self.shared_alias)
@@ -2227,13 +2227,13 @@ class TestSearchV2Shared(TestMilvusClientV2Base):
     @pytest.mark.tags(CaseLabel.L2)
     @pytest.mark.parametrize("bool_type", [True, False, "true", "false"])
     def test_search_with_expression_bool(self, bool_type):
-        """
-        target: verify search with bool filter returns only rows matching the bool condition
-        method: 1. search shared collection with bool == True/False/"true"/"false"
-                2. compute expected filter_ids locally
-                3. verify returned IDs match exactly (FLAT, 100% recall)
-        expected: exact match on filter_ids for bool filter (NULL bools excluded)
-        """
+        ""
+
+
+
+
+
+
         nb = self.shared_nb
         dim = self.shared_dim
         client = self._client(alias=self.shared_alias)
@@ -2358,14 +2358,14 @@ class TestSearchV2Shared(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_search_with_expression_array(self):
-        """
-        target: verify search with array field expressions returns exact matching results
-        method: 1. search with each array expression from gen_array_field_expressions_and_templates
-                2. compute expected filter_ids locally using eval on array data
-                3. verify exact ID match (FLAT index, 100% recall)
-                4. repeat with expression template and iterative_filter hint
-        expected: exact match between expected and returned IDs
-        """
+        ""
+
+
+
+
+
+
+
         nb = self.shared_nb
         dim = self.shared_dim
         client = self._client(alias=self.shared_alias)
@@ -2588,14 +2588,14 @@ class TestSearchV2LegacyIndependent(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_search_with_expression_auto_id(self):
-        """
-        target: verify filter expressions work correctly with auto_id primary key
-        method: 1. create collection with auto_id=True and dynamic fields
-                2. search with each float-field expression, compute expected filter_ids
-                3. verify returned IDs are subset of filter_ids (IVF_FLAT recall tolerance)
-                4. repeat with expression template
-        expected: all returned IDs satisfy the filter, recall >= 80% for IVF_FLAT
-        """
+        ""
+
+
+
+
+
+
+
         nb = ct.default_nb
         dim = 64
         search_limit = nb // 2

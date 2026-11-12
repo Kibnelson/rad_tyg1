@@ -866,13 +866,6 @@ This section outlines the testing strategy for Channel Exclusive Mode, covering 
 
 System tests should cover the following scenarios before changing the default in a production branch:
 
-| Test | Configuration | Metrics to Monitor | Status |
-|------|--------------|--------------------|--------|
-| Sustained Query Load | Multiple collections and channels with exclusive mode enabled | QPS, latency, CPU, memory, segment load latency | Recommended |
-| Node Failure During Load | Remove QueryNodes while exclusive mode is active | Query success rate, rebalancing time, channel movement count | Recommended |
-| Mode Transition Under Load | Switch between `ScoreBasedBalancer` and `ChannelLevelScoreBalancer` | QPS degradation, recovery time, task backlog | Recommended |
-| Skewed Channel Load | Collections whose channels have uneven row counts or query rates | Per-node memory, per-channel latency, task movement volume | Recommended |
-| Many Small Collections | Many collections with one or few channels each | Global QueryNode utilization and balance plan volume | Recommended |
 
 ### 9.4 Production Verification Checklist
 
@@ -883,12 +876,6 @@ System tests should cover the following scenarios before changing the default in
 - [ ] Schedule deployment during low-traffic maintenance window
 - [ ] Prepare rollback plan (change to `ScoreBasedBalancer`)
 
-**During Deployment:**
-- [ ] Monitor QueryCoord logs for exclusive mode enablement messages
-- [ ] Verify ChannelNodeInfos are populated via etcd inspection
-- [ ] Check CPU and memory usage on QueryNodes
-- [ ] Monitor query latency and QPS metrics
-- [ ] Verify no errors in balancer logs
 
 **Post-Deployment:**
 - [ ] Confirm all collections have exclusive mode enabled (if nodes sufficient)
@@ -930,10 +917,7 @@ System tests should cover the following scenarios before changing the default in
 
 ### 9.6 Performance Benchmarks
 
-This design does not include checked-in benchmark results. Before enabling this as a default, collect benchmark data for:
 
-- **Query Performance:** baseline `ScoreBasedBalancer` QPS and latency versus `ChannelLevelScoreBalancer`
-- **Transition Cost:** QPS, p99 latency, CPU, memory, disk I/O, and network usage during enable/disable transitions
 - **Rebalancing Time:** plan generation time, task execution time, and total time to reach stable channel placement
 - **Skew Sensitivity:** collections where channel row counts or query rates are uneven
 - **Scale Sensitivity:** many small collections, high channel counts, and collections whose channel count exceeds available RW nodes

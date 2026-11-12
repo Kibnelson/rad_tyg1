@@ -326,7 +326,7 @@ test_emb_list_index(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::
 
     auto result_loaded = index_loaded.Search(query_t_ds_ptr, conf, bitset_view);
 
-    // calc recall
+
     auto recall = GetKNNRecall(*golden_result, *result.value());
     printf("recall: %f\n", recall);
     auto recall_loaded = GetKNNRecall(*golden_result, *result_loaded.value());

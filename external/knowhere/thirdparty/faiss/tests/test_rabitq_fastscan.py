@@ -511,15 +511,15 @@ class TestRaBitQFastScan(unittest.TestCase):
         self.assertGreater(recall, 0.4)
 
     def test_ivf_large_bbs_aux_offsets(self):
-        """Regression for aux-factor offsets when bbs > 32 (IVF path).
+        ""
 
-        A bbs block holds bbs/32 SIMD sub-blocks. With nlist=1 every vector
-        lands in a single list that spans many bbs=64 blocks, so the b>=1
-        sub-blocks exercise ``idx_base % bbs != 0`` in IVFRaBitQHeapHandler.
-        If the per-element aux offset drops the ``idx_base % bbs`` term, roughly
-        half the vectors read another sub-block's factors and recall collapses,
-        so bbs=64 must match the bbs=32 baseline, which is always block-aligned.
-        """
+
+
+
+
+
+
+
         d, nlist, nprobe, k = 64, 1, 1, 10
         ds = datasets.SyntheticDataset(d, 2000, 2000, 100)
         I_gt = ds.get_groundtruth(k)
@@ -641,11 +641,11 @@ class TestIVFRaBitQFastScanFiltering(unittest.TestCase):
 
 @for_all_simd_levels
 class TestMultiBitRaBitQFastScan(unittest.TestCase):
-    """Consolidated tests for multi-bit RaBitQ FastScan.
+    ""
 
-    Tests IndexRaBitQFastScan and IndexIVFRaBitQFastScan for construction,
-    basic operations, recall, serialization, and factory construction.
-    """
+
+
+
 
     NLIST = 16
     NPROBE = 4
@@ -752,10 +752,10 @@ class TestMultiBitRaBitQFastScan(unittest.TestCase):
                     self.assertEqual(D.shape, (ds.nq, 10))
                     self.assertTrue(np.all(I >= 0))
 
-    # ==================== Recall Tests ====================
+
 
     def test_recall_monotonic_improvement(self):
-        """Test that recall improves with more bits."""
+        ""
         for metric in [faiss.METRIC_L2, faiss.METRIC_INNER_PRODUCT]:
             metric_str = "L2" if metric == faiss.METRIC_L2 else "IP"
             ds = datasets.SyntheticDataset(
@@ -785,7 +785,7 @@ class TestMultiBitRaBitQFastScan(unittest.TestCase):
                     self.assertGreater(recalls[8], 0.75)
 
     def test_ivf_recall_improves_with_bits(self):
-        """Test that recall improves monotonically with more bits for IVF."""
+        ""
         d, nlist, nprobe = 128, 16, 8
         ds = datasets.SyntheticDataset(d, 1000, 1000, 50)
         I_gt = ds.get_groundtruth(10)
@@ -1160,7 +1160,7 @@ class TestRaBitQFastScanSearchParams(unittest.TestCase):
     """Test that IVFRaBitQSearchParameters qb/centered are respected."""
 
     def test_higher_qb_improves_recall(self):
-        """Search with qb=4 should give better recall than qb=1."""
+        ""
         d = 64
         nlist = 16
         nprobe = 4
@@ -1193,7 +1193,7 @@ class TestRaBitQFastScanSearchParams(unittest.TestCase):
         params_qb4.qb = 4
         _, I_qb4 = index.search(ds.get_queries(), k, params=params_qb4)
 
-        # Compute recall@k
+
         recall_qb1 = np.mean(
             [len(np.intersect1d(I_qb1[i], I_gt[i])) / k for i in range(ds.nq)]
         )

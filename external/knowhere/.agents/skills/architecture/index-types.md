@@ -6,37 +6,15 @@ metric, index version, and build options.
 
 ## Overview
 
-| Index Family | Type | Best For | Metric Support |
-|--------------|------|----------|----------------|
-| Flat | Brute force | Small datasets, 100% recall | L2, IP, COSINE |
-| HNSW | Graph-based | Low latency, high recall | L2, IP, COSINE |
-| IVF | Inverted file | Large datasets, balanced | L2, IP, COSINE |
-| SCANN | IVF + Anisotropic | Fast search, good recall | L2, IP, COSINE |
-| DISKANN | Disk-based | Billion-scale, limited RAM | L2, IP, COSINE |
-| AISAQ | Disk-based + PQ | Billion-scale, optimized I/O | L2, IP, COSINE |
-| SPARSE_INVERTED_INDEX | Inverted index | Sparse vectors, text search | IP, BM25 |
-| SPARSE_WAND | Inverted index (WAND) | Sparse vectors, optimized top-k | IP, BM25 |
-| MinHash | LSH | Jaccard similarity | Jaccard |
-| GPU (CUVS) | CUDA-accelerated | High throughput | L2, IP, COSINE; HAMMING for binary CAGRA |
 
 ## Index Details
 
-### Flat
-- Location: `src/index/flat/`
-- Brute force search, no training required
-- 100% recall, O(n) search complexity
 
 ### HNSW Series
 - Location: `src/index/hnsw/`
 - Hierarchical Navigable Small World graph
 - Key params: `M` (connections), `efConstruction`, `ef` (search)
 
-| Variant | Quantization | Use Case |
-|---------|--------------|----------|
-| HNSW | None | Best recall, higher memory |
-| HNSW_SQ | Scalar (8-bit) | Balanced memory/recall |
-| HNSW_PQ | Product | Lower memory, good recall |
-| HNSW_PRQ | Product Residual | Lowest memory, acceptable recall |
 
 ### IVF Series
 - Location: `src/index/ivf/`
@@ -44,13 +22,6 @@ metric, index version, and build options.
 - Key params: `nlist` (clusters), `nprobe` (search clusters)
 - Growing variants (concurrent read/write): IVF_FLAT_CC, IVF_SQ_CC support real-time insertion
 
-| Variant | Quantization | Data Type | Use Case |
-|---------|--------------|-----------|----------|
-| IVF_FLAT | None | Dense float/int8 | Best recall in IVF family |
-| IVF_SQ | Scalar | Dense float/int8 | Balanced memory/recall |
-| IVF_PQ | Product | Dense float/int8 | Lower memory, training required |
-| IVF_RABITQ | RaBitQ | Dense float | Ultra compression (~32x) |
-| BIN_IVF_FLAT | None | Binary | Binary vector search |
 
 ### SCANN
 - Location: `src/index/ivf/ivf.cc`

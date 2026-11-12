@@ -104,7 +104,7 @@ const (
 // hnswQuantIndex carries what the three quantized HNSW variants have in common:
 // the graph params and the optional refine index. Refine keeps full-precision
 // vectors alongside the quantized ones and re-ranks with them, trading storage
-// for recall.
+
 type hnswQuantIndex struct {
 	baseIndex
 

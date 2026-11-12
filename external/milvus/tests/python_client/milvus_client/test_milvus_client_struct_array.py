@@ -2239,11 +2239,11 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
     @pytest.mark.tags(CaseLabel.L1)
     @pytest.mark.parametrize("retrieval_ann_ratio", [1.0, 3.0, 5.0, 10.0])
     def test_search_with_retrieval_ann_ratio(self, retrieval_ann_ratio):
-        """
-        target: test search with retrieval_ann_ratio parameter for struct array
-        method: search with different retrieval_ann_ratio values to control recall
-        expected: search returns results, higher ratio should improve recall
-        """
+        ""
+
+
+
+
         collection_name = cf.gen_unique_str(f"{prefix}_search")
 
         client = self._client()
@@ -2277,12 +2277,12 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_search_recall_with_maxsim_ground_truth(self):
-        """
-        target: test search recall by comparing with MaxSim ground truth
-        method: calculate brute-force MaxSim similarity as ground truth,
-                then compare with Milvus search results to compute recall
-        expected: higher retrieval_ann_ratio should improve recall
-        """
+        ""
+
+
+
+
+
 
         def maxsim_similarity_numpy(query_emb: np.ndarray, doc_emb: np.ndarray) -> float:
             """
@@ -2431,7 +2431,7 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
 
         # Search with different retrieval_ann_ratio values
         retrieval_ann_ratios = [0.1, 1.0, 3.0, 5.0]
-        recall_results = {}  # Track recall for each ratio
+        recall_results = {}
         for retrieval_ann_ratio in retrieval_ann_ratios:
             log.info(f"\n{'=' * 50}")
             log.info(f"Testing retrieval_ann_ratio={retrieval_ann_ratio}")
@@ -2452,7 +2452,7 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
             # Get Milvus search result IDs
             milvus_result_ids = set([hit["id"] for hit in results[0]])
 
-            # Calculate recall: intersection of ground truth and Milvus results
+
             recall_hits = len(ground_truth_ids.intersection(milvus_result_ids))
             recall = recall_hits / len(ground_truth_ids)
             recall_results[retrieval_ann_ratio] = recall
@@ -2480,7 +2480,7 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
                     f"gt_score={gt_score:.6f}, gt_rank={gt_rank}"
                 )
 
-            # Calculate recall at different K values
+
             for k in [1, 5, 10]:
                 gt_top_k = set([item[0] for item in ground_truth_scores[:k]])
                 recall_at_k = len(gt_top_k.intersection(milvus_result_ids)) / min(k, limit)
@@ -2494,7 +2494,7 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
             assert recall >= 0, f"Recall should be non-negative, got {recall}"
             assert len(results[0]) == limit, f"Expected {limit} results, got {len(results[0])}"
 
-        # Verify that higher retrieval_ann_ratio leads to higher or equal recall
+
         log.info(f"\nRecall results summary: {recall_results}")
         for i in range(len(retrieval_ann_ratios) - 1):
             ratio_curr = retrieval_ann_ratios[i]
@@ -2505,7 +2505,7 @@ class TestMilvusClientStructArraySearch(TestMilvusClientV2Base):
                 f"but ratio {ratio_next} has recall {recall_results[ratio_next]}"
             )
 
-        # Verify that recall >= 0.8 when retrieval_ann_ratio >= 3
+
         for ratio, recall in recall_results.items():
             if ratio >= 3:
                 assert recall >= 0.8, (

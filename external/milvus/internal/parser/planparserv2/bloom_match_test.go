@@ -723,7 +723,7 @@ func bloomBytesTemplateMixed(t *testing.T, fpr float64, ints []int64, strs []str
 // TestBloomMatchRejectsWrongValueDomain pins the proxy-side gate: a blob built
 // from the wrong value domain is an input error, not a query that silently
 // returns fewer rows. The probe side already refuses to alias across domains,
-// so the failure would otherwise be an invisible drop in recall.
+
 func TestBloomMatchRejectsWrongValueDomain(t *testing.T) {
 	helper := newTestSchemaHelper(t)
 

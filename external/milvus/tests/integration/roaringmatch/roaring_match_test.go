@@ -418,7 +418,7 @@ func (s *RoaringMatchTestSuite) TestNarrowWidthValuesRoundTrip() {
 
 // TestVectorAndHybridSearchApplyExactFilter complements the deterministic
 // Query assertions above by exercising both vector-search request paths. ANN
-// recall is intentionally not asserted here; every returned row must belong to
+
 // the exact member set, which proves neither path silently drops the filter.
 func (s *RoaringMatchTestSuite) TestVectorAndHybridSearchApplyExactFilter() {
 	collectionName := "test_roaring_vector_" + funcutil.GenRandomStr()

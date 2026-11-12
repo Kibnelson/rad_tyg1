@@ -100,7 +100,7 @@ class TestIndexRefineSearchParams(unittest.TestCase):
         D3, I3 = index.search(xq, 10, params=params)
         inter3 = faiss.eval_intersection(I3, ds.get_groundtruth(10))
 
-        # make sure that the recall rate increases with k_factor
+
         self.assertGreater(inter2, inter1)
         self.assertGreater(inter3, inter2)
 
@@ -122,7 +122,7 @@ class TestIndexRefineSearchParams(unittest.TestCase):
         D5, I5 = index.search(xq, 10, params=params)
         inter5 = faiss.eval_intersection(I5, ds.get_groundtruth(10))
 
-        # make sure that the recall rate changes
+
         self.assertNotEqual(inter4, inter5)
 
     def test_rflat(self):
@@ -230,9 +230,9 @@ class TestIndexRefineRangeSearch(unittest.TestCase):
         # radius * k_factor); the results are still filtered at the requested
         # radius, so every returned distance must stay on the correct side of it
         # regardless of k_factor (issue #5367). For an L2 base a larger k_factor
-        # widens the base search and can only add candidates, so recall must not
+
         # decrease; for a similarity base radius * k_factor does not necessarily
-        # widen the search, so no recall guarantee is asserted there.
+
         recalls = []
         for k_factor in (1, 4):
             index_r.k_factor = k_factor

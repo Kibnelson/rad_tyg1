@@ -605,7 +605,7 @@ func (c *ClientBase[T]) Call(ctx context.Context, caller func(client T) (any, er
 	return ret, err
 }
 
-// ReCall does the grpc call twice
+
 func (c *ClientBase[T]) ReCall(ctx context.Context, caller func(client T) (any, error)) (any, error) {
 	// All retry operations are done in `call` function.
 	return c.Call(ctx, caller)

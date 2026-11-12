@@ -10,9 +10,7 @@ Tracking issue: [#51192](https://github.com/milvus-io/milvus/issues/51192)
 
 ## Motivation
 
-Recommendation and learning-to-rank workloads often use vector search as a recall stage, then apply a ranking model over scalar features to reorder the recalled candidates. The ranking model may use business features such as price, click-through-rate, freshness, user-specific scores, or other scalar columns stored with the entity.
 
-Milvus already supports FunctionChain-based rerank pipelines. Adding a native XGBoost expression lets users keep vector recall and model-based reranking in the same search request, avoiding an external requery-and-rerank round trip for L0 rerank scenarios.
 
 ## Goals
 

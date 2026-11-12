@@ -52,7 +52,7 @@ class TestLargeTopkShared(TestMilvusClientV2Base):
             self.create_collection(client, col_name, schema=schema,
                                    properties=query_mode_props, force_teardown=False)
             index_params = self.prepare_index_params(client)[0]
-            # FLAT: 100% recall, simplifies assertions
+
             index_params.add_index(vec_field, index_type="FLAT", metric_type="L2")
             self.create_index(client, col_name, index_params)
             self.load_collection(client, col_name)
@@ -138,13 +138,13 @@ class TestLargeTopkShared(TestMilvusClientV2Base):
     @pytest.mark.tags(CaseLabel.L0)
     @pytest.mark.parametrize("topk", [large_topk_first, large_topk_total - default_nb])
     def test_large_topk_above_normal_limit(self, topk):
-        """
-        target: verify query_mode=large_topk allows topk above 16384 without error (core MVP)
-        method: search col_large_topk (large_topk_total vectors) with topk in [large_topk_first, large_topk_total - default_nb]
-        expected: search completes without exception, returns results with ascending L2 distances.
-                  Note: exact result count is not asserted — large_topk forces IVF index which
-                  does not guarantee 100% recall, so returned count may be < topk.
-        """
+        ""
+
+
+
+
+
+
         client = self._client()
         results = client.search(self.col_large_topk, data=cf.gen_vectors(default_nq, default_dim),
                                 anns_field=vec_field, limit=topk)

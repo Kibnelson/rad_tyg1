@@ -1797,11 +1797,11 @@ class TestMilvusClientFunctionChainXGBoost(TestMilvusClientV2Base):
         minio_host,
         minio_bucket,
     ):
-        """
-        target: establish comparable ordinary/cold/warm XGBoost latency baselines
-        method: alternate 100 ordinary and 100 reranked searches after 20 warmups on the 3x3000 topology
-        expected: zero errors, score parity, bounded requests, and reproducible percentile/QPS output
-        """
+        ""
+
+
+
+
         client = self._client()
         fixture = self._prepare_non_functional_case(
             client,

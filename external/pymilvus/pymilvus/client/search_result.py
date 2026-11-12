@@ -217,32 +217,32 @@ class HybridHits(list):
 
 
 class SearchResult(list):
-    """A list[list[dict]] Contains nq * limit results.
+    ""
 
-    The first level is the results for each nq, and the second level
-    is the top-k(limit) results for each query.
 
-    Examples:
-        >>> nq_res = client.search()
-        >>> for topk_res in nq_res:
-        >>>     for one_res in topk_res:
-        >>>         print(one_res)
-        {"id": 1, "distance": 0.1, "entity": {"vector": [1.0, 2.0, 3.0], "name": "a"}}
-        ...
 
-        >>> res[0][0]
-        {"id": 1, "distance": 0.1, "entity": {"vector": [1.0, 2.0, 3.0], "name": "a"}}
 
-        >>> res.recalls
-        [0.9, 0.9, 0.9]
 
-        >>> res.extra
-        {"cost": 1}
 
-    Attributes:
-        recalls(List[float], optional): The recalls of the search result, one for each query.
-        extra(Dict, optional): The extra information of the search result.
-    """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def __init__(
         self,
@@ -254,7 +254,7 @@ class SearchResult(list):
         _data = self._parse_search_result_data(res, round_decimal)
         super().__init__(_data)
 
-        # set recalls
+
         self.recalls = res.recalls if len(res.recalls) > 0 else None
 
         # set extra info

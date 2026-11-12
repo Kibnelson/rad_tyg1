@@ -120,7 +120,7 @@ namespace diskann {
     // reorder (set true to include full precision in data file:
     // optional paramter, use only when using disk PQ
     bool reorder = false;
-    // accelerate the index build ~30% and lose ~1% recall
+
     bool accelerate_build = false;
     // the cached nodes number
     uint32_t num_nodes_to_cache = 0;

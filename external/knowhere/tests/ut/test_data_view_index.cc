@@ -27,7 +27,7 @@
 
 namespace {
 constexpr float kKnnRecallThreshold = 0.6f;
-constexpr float kEmbListRecallThreshold = 0.6f;  // same as kKnnRecallThreshold
+constexpr float kEmbListRecallThreshold = 0.6f;
 constexpr float kBruteForceRecallThreshold = 0.95f;
 constexpr int kCosineMaxMissNum = 5;
 }  // namespace

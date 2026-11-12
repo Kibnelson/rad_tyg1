@@ -544,7 +544,7 @@ func collapseElementLevelResultWithMetricDirection(result *milvuspb.SearchResult
 			typeutil.AppendIDs(output.Ids, data.GetIds(), int(hit.rowIdx))
 			output.Scores = append(output.Scores, hit.aggregate)
 			// For aggregate collapse strategies, Score is the row aggregate while
-			// Distance/Recall keep the representative best element's values.
+
 			if len(data.GetDistances()) > 0 {
 				output.Distances = append(output.Distances, data.GetDistances()[hit.rowIdx])
 			}

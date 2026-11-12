@@ -128,7 +128,7 @@ func (idx *FMIndex) WithSaSampleRate(rate int) *FMIndex {
 
 // WithBlockBytes sets the rank-directory block granularity in bytes. Must be a
 // power of two in [8, 128]; the server default is 64. Larger blocks shrink the
-// resident directory at no throughput cost up to ~64.
+
 func (idx *FMIndex) WithBlockBytes(blockBytes int) *FMIndex {
 	idx.buildParams[fmIndexBlockBytesKey] = strconv.Itoa(blockBytes)
 	return idx

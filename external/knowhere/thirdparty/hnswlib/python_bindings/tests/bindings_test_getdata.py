@@ -29,7 +29,7 @@ class RandomSelfTestCase(unittest.TestCase):
 
         p.init_index(max_elements=num_elements, ef_construction=100, M=16)
 
-        # Controlling the recall by setting ef:
+
         # higher ef leads to better accuracy, but slower search
         p.set_ef(100)
 

@@ -205,7 +205,7 @@ if parametersets == ["autotune"] or parametersets == ["autotuneMT"]:
     if parametersets == ["autotune"]:
         faiss.omp_set_num_threads(1)
 
-    # setup the Criterion object: optimize for 1-R@1
+
     crit = faiss.OneRecallAtRCriterion(nq, 1)
     # by default, the criterion will request only 1 NN
     crit.nnn = 100

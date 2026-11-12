@@ -158,7 +158,7 @@ func (d dec) searchResultData(b []byte, srd *schemapb.SearchResultData) error {
 					return err
 				}
 			}
-		case 12: // recalls (packed fixed32)
+		case 12:
 			if err := appendPackedF32(v, &srd.Recalls); err != nil {
 				return err
 			}

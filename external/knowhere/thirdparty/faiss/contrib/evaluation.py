@@ -23,7 +23,7 @@ def knn_intersection_measure(I1, I2):
 
 
 ###############################################################
-# Range search results can be compared with Precision-Recall
+
 
 
 def filter_range_results(lims, D, I, thresh):
@@ -37,8 +37,8 @@ def filter_range_results(lims, D, I, thresh):
 
 
 def range_PR(lims_ref, Iref, lims_new, Inew, mode="overall"):
-    """compute the precision and recall of range search results. The
-    function does not take the distances into account."""
+    ""
+
 
     def ref_result_for(i):
         return Iref[lims_ref[i] : lims_ref[i + 1]]
@@ -77,11 +77,11 @@ def range_PR(lims_ref, Iref, lims_new, Inew, mode="overall"):
 
 
 def counts_to_PR(ngt, nres, ninter, mode="overall"):
-    """computes a  precision-recall for a set of queries.
-    ngt = nb of GT results per query
-    nres = nb of found results per query
-    ninter = nb of correct results per query (smaller than nres of course)
-    """
+    ""
+
+
+
+
 
     if mode == "overall":
         ngt, nres, ninter = ngt.sum(), nres.sum(), ninter.sum()
@@ -101,7 +101,7 @@ def counts_to_PR(ngt, nres, ninter, mode="overall"):
         return precision, recall
 
     elif mode == "average":
-        # average precision and recall over queries
+
 
         mask = ngt == 0
         ngt[mask] = 1
@@ -158,10 +158,10 @@ def range_PR_multiple_thresholds(
     mode="overall",
     do_sort="ref,new",
 ):
-    """compute precision-recall values for range search results
-    for several thresholds on the "new" results.
-    This is to plot PR curves
-    """
+    ""
+
+
+
     # ref should be sorted by ids
     if "ref" in do_sort:
         Iref = sort_range_res_1(lims_ref, Iref)

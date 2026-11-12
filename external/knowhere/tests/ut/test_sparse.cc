@@ -968,13 +968,13 @@ TEST_CASE("Test Sparse Index Dim Max Score Ratio", "[sparse]") {
         search_json[knowhere::meta::TOPK] = topk;
         search_json[knowhere::meta::METRIC_TYPE] = metric;
 
-        // Ratio < 1.0: More aggressive pruning, potentially lower recall but faster
+
         search_json[knowhere::meta::DIM_MAX_SCORE_RATIO] = 0.8;
         auto results_aggressive = idx.Search(query_ds, search_json, nullptr);
         REQUIRE(results_aggressive.has_value());
         float recall_aggressive = GetKNNRecall(*gt.value(), *results_aggressive.value());
 
-        // Ratio > 1.0: Less aggressive pruning, higher recall but potentially slower
+
         search_json[knowhere::meta::DIM_MAX_SCORE_RATIO] = 1.2;
         auto results_conservative = idx.Search(query_ds, search_json, nullptr);
         REQUIRE(results_conservative.has_value());
@@ -1243,7 +1243,7 @@ TEST_CASE("Test Sparse Index Drop Ratio Search", "[sparse]") {
     float recall_exact = GetKNNRecall(*gt.value(), *results_exact.value());
     REQUIRE(recall_exact >= 0.99);
 
-    // drop_ratio_search > 0: approximate search, recall should still be reasonable
+
     knowhere::Json search_json_approx;
     search_json_approx[knowhere::meta::TOPK] = topk;
     search_json_approx[knowhere::meta::METRIC_TYPE] = knowhere::metric::IP;
@@ -1252,7 +1252,7 @@ TEST_CASE("Test Sparse Index Drop Ratio Search", "[sparse]") {
     auto results_approx = idx.Search(query_ds, search_json_approx, nullptr);
     REQUIRE(results_approx.has_value());
     float recall_approx = GetKNNRecall(*gt.value(), *results_approx.value());
-    // Approximate search should have lower recall than exact, but still reasonable
+
     REQUIRE(recall_approx >= 0.5);
     REQUIRE(recall_exact >= recall_approx);
 }
@@ -1301,7 +1301,7 @@ TEST_CASE("Test Sparse Index CC Build Add Search", "[sparse]") {
 
         auto results = idx.Search(query_ds, json, nullptr);
         REQUIRE(results.has_value());
-        // Recall may be slightly different since we added extra data not in gt,
+
         // but original results should still be findable
         auto* ids = results.value()->GetIds();
         auto k = results.value()->GetDim();

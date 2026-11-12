@@ -2607,7 +2607,7 @@ func (s *Server) DropSnapshot(ctx context.Context, req *datapb.DropSnapshotReque
 	// observe now is authoritative for the rest of this broadcast. This closes
 	// the race that would otherwise let a Pin slip in, cause the ack callback
 	// to observe ErrSnapshotPinned, and trigger retry-forever (holding this
-	// very lock → throughput deadlock on the snapshot control plane).
+
 	//
 	// Rejecting here (instead of in the ack callback) means clients get a
 	// synchronous, non-retrying error and the broadcast is never initiated.

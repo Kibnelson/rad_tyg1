@@ -1379,7 +1379,7 @@ func (m *ClientTelemetryManager) SetConfigHash(hash string) {
 // createSnapshot creates a new metrics snapshot and adds it to the history
 // P99 is calculated atomically in collectMetrics() -> GetMetrics() -> calculateP99()
 // This eliminates the race condition where sendHeartbeat could read from a cleared sample buffer
-// Note: QPS calculation uses fixed heartbeat interval as window (configured via HeartbeatInterval)
+
 func (m *ClientTelemetryManager) createSnapshot() {
 	m.configMu.RLock()
 	enabled := m.config.Enabled
@@ -1514,7 +1514,7 @@ var configPayloadKeys = map[string]struct{}{
 type CollectionMetricsPayload struct {
 	Enabled      bool     `json:"enabled"`
 	Collections  []string `json:"collections,omitempty"`
-	MetricsTypes []string `json:"metrics_types,omitempty"` // e.g., "qps", "latency"
+	MetricsTypes []string `json:"metrics_types,omitempty"`
 }
 
 // handlePushConfig handles dynamic configuration updates

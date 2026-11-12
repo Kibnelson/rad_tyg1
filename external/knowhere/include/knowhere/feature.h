@@ -36,7 +36,7 @@ constexpr uint64_t INT8 = 1UL << 5;
 constexpr uint64_t EMB_LIST = 1UL << 15;
 // This flag indicates that there is no need to create any index structure (build stage can be skipped)
 constexpr uint64_t NO_TRAIN = 1UL << 16;
-// This flag indicates that the index defaults to KNN search, meaning the recall is 100% (no precision loss compared
+
 // with original data)
 constexpr uint64_t KNN = 1UL << 17;
 // This flag indicates that the index search stage will be performed on GPU (need GPU devices)

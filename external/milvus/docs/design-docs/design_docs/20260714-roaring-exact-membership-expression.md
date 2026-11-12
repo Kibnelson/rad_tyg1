@@ -491,15 +491,6 @@ ranges, uniform random values in a 32-bit domain, uniform random values across
 the full signed 64-bit domain, and duplicate-heavy input. For 10K, 100K, 1M,
 and, where feasible, 10M input values, report:
 
-- Input count and distinct cardinality.
-- MRB1 bytes and bits per distinct member.
-- Serialized repeated-int64/`TermExpr` size.
-- MBF1 size at the documented Bloom false-positive rate, clearly labeled
-  approximate.
-- Client build time, Proxy validation time, QueryNode parse time, and probe
-  throughput.
-- End-to-end request latency and p50/p99 execution latency for `IN`,
-  `bloom_match`, and `roaring_match`.
 
 ### Reference Go client build measurement (non-normative)
 
@@ -525,16 +516,6 @@ go test -tags dynamic,test -gcflags="all=-N -l" -count=1 \
 | Shuffled full-range INT64, admitted | 200,000 | 1,600,000 B | 111.0 ms | 4,400,016 | 22.00 | 53,735,629 | 1,600,081 | 43.1 MiB |
 | Shuffled full-range INT64, rejected | 300,000 | 2,400,000 B | 52.0 ms | 0 | n/a | 2,401,490 | 9 | 2.3 MiB |
 
-`Build time`, `Build B/op`, and `Allocs/op` are the three-run benchmark results;
-`peak build live heap` is the separate resource report's sampled live heap
-attributable to `Build`. Neither includes the caller-owned input slice shown
-separately. The rejected full-range case pays for one 2.4 MiB
-sorted-key copy and then fails the high-container admission before constructing
-the Roaring bitmap, avoiding the millions of allocations seen in an admitted
-sparse build. The table also demonstrates why no member-count-only capacity
-claim is valid: one million contiguous IDs encode in 274 bytes, while 200K
-full-range IDs encode in 4.4 MiB and cost roughly 43 MiB of transient build
-heap.
 
 The 128 MiB body ceiling is an engine admission limit, not a promise that an
 MRB1 blob of that size can pass every transport. Request framing, other
@@ -821,19 +802,6 @@ Existing collections, segments, and indexes require no rewrite.
 
 ### Performance tests
 
-- Publish the distribution-sensitive size matrix described above rather than a
-  universal member-count claim.
-- Compare request size, client build, Proxy validation, QueryNode parse,
-  decoded memory, probe throughput, and p50/p99 latency for `IN`, Bloom, and
-  Roaring.
-- Verify parse and validation are linear in blob size and that index-only
-  execution stays batched.
-- Exercise concurrent large blobs to establish a QueryNode/tenant-wide
-  operational admission policy before broad enablement.
-- Benchmark client construction with `-benchmem` for contiguous, shuffled
-  INT32, Snowflake-like, admitted full-range INT64, and rejected full-range
-  INT64 shapes; report time, bytes/op, allocations/op, output bytes, and
-  bytes/member.
 
 ## Rollout Plan
 

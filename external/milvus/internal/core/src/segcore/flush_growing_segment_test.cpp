@@ -3148,7 +3148,7 @@ TEST_F(FlushGrowingSegmentTest,
     }
     EXPECT_EQ(seen, N);
 
-    // The in-flight budget is a throughput/memory knob, never a correctness
+
     // one: accumulating callers pass kAccumulatingInflightBytes so the window
     // does not add half a gigabyte of pinned arrow batches on top of a column
     // they retain anyway. A budget small enough that every batch exceeds it

@@ -3252,16 +3252,16 @@ class TestMinHashFunctionCorrectness(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_minhash_lsh_recall(self):
-        """
-        target: evaluate MINHASH_LSH search recall quality
-        method:
-            1. Generate test texts with high similarity (same base, small variations)
-            2. Compute MinHash signatures using C++ binding
-            3. Calculate ground truth using brute-force Jaccard similarity
-            4. Perform ANN search with MINHASH_LSH
-            5. Calculate recall@k
-        expected: recall should be above acceptable threshold for similar texts
-        """
+        ""
+
+
+
+
+
+
+
+
+
 
         client = self._client()
         collection_name = cf.gen_collection_name_by_testcase_name()
@@ -3284,7 +3284,7 @@ class TestMinHashFunctionCorrectness(TestMilvusClientV2Base):
             variant = base_text[:i] + "X" + base_text[i+1:] if i < len(base_text) else base_text + str(i)
             test_texts.append((i, variant))
 
-        # Create collection with lower mh_lsh_band for better recall
+
         schema = self.create_schema(client, enable_dynamic_field=False)[0]
         schema.add_field(default_primary_key_field_name, DataType.INT64, is_primary=True, auto_id=False)
         schema.add_field(default_text_field_name, DataType.VARCHAR, max_length=65535)
@@ -3303,13 +3303,13 @@ class TestMinHashFunctionCorrectness(TestMilvusClientV2Base):
             },
         ))
 
-        # Use fewer bands for better recall (more candidates pass LSH filter)
+
         index_params = self.prepare_index_params(client)[0]
         index_params.add_index(
             field_name=default_minhash_field_name,
             index_type="MINHASH_LSH",
             metric_type="MHJACCARD",
-            params={"mh_lsh_band": 8},  # Fewer bands = higher recall, lower precision
+            params={"mh_lsh_band": 8},
         )
         self.create_collection(client, collection_name, schema=schema, index_params=index_params)
 
@@ -3362,24 +3362,24 @@ class TestMinHashFunctionCorrectness(TestMilvusClientV2Base):
 
         log.info(f"ANN results: {ann_results}")
 
-        # Calculate recall
+
         recall = len(ann_results & ground_truth_topk) / len(ground_truth_topk) if ground_truth_topk else 0
         log.info(f"Recall@{top_k}: {recall:.4f}")
 
-        # Verify recall meets minimum threshold
+
         assert recall >= min_recall, \
             f"Recall@{top_k} is {recall:.4f}, expected >= {min_recall}"
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_minhash_lsh_recall_with_different_bands(self):
-        """
-        target: evaluate how mh_lsh_band parameter affects recall
-        method:
-            1. Create collections with different mh_lsh_band values
-            2. Measure recall for each configuration
-            3. Verify that more bands generally improve recall (with trade-off)
-        expected: recall should vary with band configuration
-        """
+        ""
+
+
+
+
+
+
+
 
         client = self._client()
 
@@ -3476,7 +3476,7 @@ class TestMinHashFunctionCorrectness(TestMilvusClientV2Base):
             recall = len(ann_results & ground_truth) / len(ground_truth) if ground_truth else 0
             recalls[bands] = recall
 
-        # Verify we got different recalls for different band configs
+
         # (the specific relationship depends on data characteristics)
         assert len(set(recalls.values())) >= 1, \
             f"Expected varying recalls for different bands, got: {recalls}"
@@ -4250,19 +4250,19 @@ class TestMilvusClientMinHashNullable(TestMilvusClientV2Base):
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_minhash_nullable_input_field_insert_and_search(self):
-        """
-        target: test MinHash function works with nullable input field
-        method:
-            1. Create collection with nullable=True VARCHAR input field
-            2. Insert rows with normal text, empty string, and NULL text
-            3. Verify NULL text produces all-0xFFFFFFFF signature
-            4. Verify normal text search does not recall NULL rows
-            5. Verify same text produces identical signatures
-        expected:
-            - Insert succeeds for all rows including NULL
-            - NULL text generates max-value signature (0xFFFFFFFF)
-            - Search with normal text returns correct matches, NULL rows excluded
-        """
+        ""
+
+
+
+
+
+
+
+
+
+
+
+
         client = self._client()
         collection_name = cf.gen_collection_name_by_testcase_name()
 
@@ -4328,7 +4328,7 @@ class TestMilvusClientMinHashNullable(TestMilvusClientV2Base):
         assert sigs[0] != null_expected
         assert sigs[2] != null_expected
 
-        # Search with normal text should not recall NULL rows
+
         results = self.search(
             client, collection_name, [test_text],
             anns_field=default_minhash_field_name,

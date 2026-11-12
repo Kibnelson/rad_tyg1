@@ -144,11 +144,11 @@ main(void) {
     CHECK(snprintf(raw_path, sizeof(raw_path), "%s/raw.bin", directory) < (int)sizeof(raw_path));
     CHECK(snprintf(index_prefix, sizeof(index_prefix), "%s/index", directory) < (int)sizeof(index_prefix));
 
-    /* Use a uniform dataset and verify ANN recall against exact search, as
-     * the upstream DiskANN tests do. Isolated near-zero points in a distant
-     * cluster can be unreachable in the approximate graph. A fixed input
-     * seed does not fix DiskANN's randomized graph construction.
-     */
+
+
+
+
+
     for (row = 0; row < ROWS; ++row) {
         for (column = 0; column < DIMENSIONS; ++column) {
             random_state = random_state * UINT32_C(1664525) + UINT32_C(1013904223);

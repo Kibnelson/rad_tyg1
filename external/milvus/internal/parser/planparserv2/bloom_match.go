@@ -221,7 +221,7 @@ func validateMBF1Envelope(blob []byte) error {
 // target field can never probe. The two hash domains share one XXH64 output
 // space, so the prober refuses to probe a domain the blob does not declare —
 // which means a wrong-domain blob would otherwise execute happily and just
-// return fewer rows, with no error anywhere. That silent recall loss is the
+
 // failure this check converts into an input error at the request boundary.
 //
 // Two shapes are deliberately NOT rejected:

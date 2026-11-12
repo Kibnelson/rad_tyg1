@@ -34,7 +34,7 @@ const (
 	DefaultAvgDuration = 3 * time.Second
 )
 
-// RateCollector helps to collect and calculate values (like throughput, QPS, TPS, etc...),
+
 // It implements a sliding window with custom size and granularity to store values.
 type RateCollector struct {
 	sync.Mutex

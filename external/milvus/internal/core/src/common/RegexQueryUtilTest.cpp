@@ -3115,7 +3115,7 @@ TEST(UTF8ConsistencyTest, FindSegmentMidCharacterBoundary) {
 }
 
 // ============== Pattern Matching Performance Benchmark ==============
-// Compares throughput of: RE2, Boost regex, and LikePatternMatcher
+
 // across different pattern types and data sizes.
 // Run with: --gtest_filter="*PatternMatchBenchmark*"
 

@@ -48,25 +48,6 @@ from a build or installation tree. Some Conan shared libraries have transitive
 dependencies without their own RUNPATH. The packaged-JAR smoke tests deliberately
 run without that build environment.
 
-For a C-only build, omit `with_jni`. The public header is
-`include/knowhere/c_api.h`; link with `libknowhere_c`. Neither a JDK nor JNI
-headers are needed by the C library. To include Linux DiskANN, add
-`-o '&:with_diskann=True'` to the Conan command. DiskANN indexes receive a
-`LocalFileManager`; use `buildFromFile(parameters)` with `data_path`,
-`index_prefix` and the usual DiskANN configuration. Its serialized BinarySet
-does not contain the generated files: loading uses the same local `index_prefix`.
-Those files must remain available until their indexes close. A normal in-memory
-index rejects `buildFromFile`; DiskANN rejects the vector-buffer `build` entry.
-Run the DiskANN JNI test explicitly with
-`mvn -f java/pom.xml test -Dtest=KnowhereTest,DiskAnnIT -DargLine=-Xcheck:jni`
-and the same `knowhere.native.path` property and signal-chaining environment.
-OSS DiskANN reports exact distances and the DiskANN tests check them to 1e-4.
-A Cardinal build (`with_cardinal=True`) searches with PQ8 and refines with RBQ8,
-so its reported distances carry quantization error; the C test then applies a
-relative tolerance through `KNOWHERE_WITH_CARDINAL`, and `DiskAnnIT` needs
-`-Dknowhere.test.approximateDistances=true` in `argLine` to do the same.
-Recall and result ordering are checked identically for both engines. On macOS, use the `.dylib`
-extension for the development library.
 
 The shared Folly dependency installs a SIGPIPE handler at library load time.
 For HotSpot on Linux, preload the **same JRE's** `libjsig.so` before starting
@@ -304,29 +285,3 @@ batch the same way and its direct pass after it on the calling thread, once the
 two settings are restored.
 
 ## Verification coverage
-
-The tests exercise five dtypes with FLAT/BIN_FLAT and brute force, HNSW and
-IVF_FLAT round trips, filtering, exact fixed examples, invalid inputs, Unicode
-blob names, input retention for builds, the BinarySet frozen against writes
-once an index loaded from it, chunk bounds, double close, concurrent close and
-thread pool sizing before and after searches. The batched brute force is
-compared with the per-query entry for L2 above and below the BLAS threshold, IP
-and COSINE, with six concurrent callers against one serial answer, and checked
-for the `-1` tail, an empty base with 20 queries for each metric, zero queries
-and rejected metric, dtype and conflicting `k`.
-The L2 rescoring entry is checked on rows far from the origin and close
-together, where every direct distance must match a pairwise Σ(x−y)² to 1e-6,
-for the computed prefix and counts at each kind of cutoff including the `-1`
-tail, without cutoffs, with top-k 1 and an empty base, and for rejected
-metrics, dtypes, NaN cutoffs and short buffers; the address build's argument
-checks are covered, while a region larger than one
-`ByteBuffer` is exercised by the consumers' integration runs, since a Java test
-has no portable way to obtain a direct buffer's address.
-DiskANN has a separate local-file test when enabled. It checks recall against
-brute force on uniformly distributed samples, plus IDs, distances and exclusions;
-its approximate graph does not guarantee exact neighbors for isolated points.
-The packager tests compile
-small real ELF libraries to exercise dependency resolution and relocation;
-those tests do not substitute for the Knowhere native tests or packaged JNI
-smoke test. Only combinations that pass the native tests on a target platform
-should be advertised in a released artifact.

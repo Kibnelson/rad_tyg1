@@ -67,7 +67,7 @@ func newKeyLockDispatcher[K comparable](maxParallel int) *keyLockDispatcher[K] {
 //
 // Backpressure: blocks the caller when total pending tasks reach the semaphore
 // capacity. This is the mechanism that slows down the pipeline goroutine when
-// sync throughput cannot keep up with the write rate. The caller can cancel via
+
 // ctx to unblock during shutdown.
 func (d *keyLockDispatcher[K]) Submit(ctx context.Context, key K, t Task, callbacks ...func(error) error) *conc.Future[struct{}] {
 	nodeID := paramtable.GetStringNodeID()

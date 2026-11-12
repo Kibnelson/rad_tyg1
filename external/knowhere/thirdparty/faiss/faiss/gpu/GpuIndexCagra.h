@@ -76,7 +76,7 @@ struct IVFPQBuildCagraConfig {
     /// Possible values: [4, 5, 6, 7, 8].
     ///
     /// Hint: the smaller the 'pq_bits', the smaller the index size and the
-    /// better the search performance, but the lower the recall.
+
 
     uint32_t pq_bits = 8;
     ///
@@ -86,7 +86,7 @@ struct IVFPQBuildCagraConfig {
     /// NB: `pq_dim  /// pq_bits` must be a multiple of 8.
     ///
     /// Hint: a smaller 'pq_dim' results in a smaller index size and better
-    /// search performance, but lower recall. If 'pq_bits' is 8, 'pq_dim' can be
+
     /// set to any number, but multiple of 8 are desirable for good performance.
     /// If 'pq_bits' is not 8, 'pq_dim' should be a multiple of 8. For good
     /// performance, it is desirable that 'pq_dim' is a multiple of 32. Ideally,
@@ -138,7 +138,7 @@ struct IVFPQSearchCagraConfig {
     ///
     /// The use of low-precision types reduces the amount of shared memory
     /// required at search time, so fast shared memory kernels can be used even
-    /// for datasets with large dimensionality. Note that the recall is slightly
+
     /// degraded when low-precision type is selected.
 
     cudaDataType_t lut_dtype = CUDA_R_32F;
@@ -184,12 +184,12 @@ struct AllNeighborsCagraConfig {
     size_t n_clusters = 0;
 
     /// Clusters each vector is assigned to. Must be >= 2: with 1 there are no
-    /// cross-cluster edges and recall collapses. 0 selects 2.
+
     size_t overlap_factor = 2;
 
     /// Bounds IVF-PQ search memory during the knn build. cuVS's default can
     /// exhaust device memory around 100M vectors; 8192 avoids that and does
-    /// not change recall. 0 keeps cuVS's default.
+
     uint32_t ivf_pq_search_batch_size = 0;
 
     /// IVF-PQ refinement multiplier. The refine pass runs on the CPU, so cost
@@ -229,7 +229,7 @@ struct GpuIndexCagraConfig : public GpuIndexConfig {
     AllNeighborsCagraConfig all_neighbors_params;
 
     /// Build the HNSW upper levels on the GPU during copyTo() instead of by
-    /// CPU insertion. Roughly 10x faster, but measured worse recall than
+
     /// base_level_only, which is cheaper still. Off by default.
     bool gpu_hnsw_upper_levels = false;
 

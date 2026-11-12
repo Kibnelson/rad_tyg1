@@ -375,7 +375,6 @@ A function used by an operator must also declare that it is runnable at that sta
 
 This is part of the user-provided plan. Search does not append an implicit public `limit` or `offset` operator.
 
-For L1, `limit` is an intermediate candidate budget applied independently for each worker and each query-vector chunk. It is not the final client Search limit. A candidate discarded by a worker cannot reappear at the shard leader or Proxy, so L1 `limit` can reduce recall. Users must size it for the expected worker fan-out and desired recall.
 
 When an L1 chain contains both user `sort` and `limit`, the limit observes the user-defined ordering. After the complete user chain, QueryNode applies an internal normalization sort by `$score` descending with `$id` ascending as the tie-break. This internal step is not a public chain operator; it restores the ordering contract required by downstream shard and Proxy reducers without changing which candidates the user's L1 `limit` selected.
 

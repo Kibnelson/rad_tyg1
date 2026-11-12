@@ -456,7 +456,7 @@ var (
 			Help:      "counter of retry search which does not have enough results",
 		}, []string{nodeIDLabelName, queryTypeLabelName, databaseLabelName, collectionName})
 
-	// ProxyRecallSearchCount records the counter that users issue recall evaluation requests, which are cpu-intensive
+
 	ProxyRecallSearchCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: milvusNamespace,

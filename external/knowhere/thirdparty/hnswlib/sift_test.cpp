@@ -287,10 +287,10 @@ void sift_test() {
 //    }
 //    
 //    //get_knn_quality(massA, vecsize, maxn, appr_alg);
-//    test_vs_recall( massQ, vecsize, qsize, appr_alg, vecdim, answers, k);
-//    /*test_vs_recall( massQ, vecsize, qsize, appr_alg, vecdim, answers, k);
-//    test_vs_recall( massQ, vecsize, qsize, appr_alg, vecdim, answers, k);
-//    test_vs_recall( massQ, vecsize, qsize, appr_alg, vecdim, answers, k);*/
+
+
+
+
 //
 //    
 //

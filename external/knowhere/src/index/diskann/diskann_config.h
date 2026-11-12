@@ -30,7 +30,7 @@ class DiskANNConfig : public BaseConfig {
     // longer indexing times, but better search quality.
     CFG_INT max_degree;
     // The size of the search list during the index build or (knn/range) search. Typical values are between 75 to 200.
-    // Larger values will take more time to build but result in indices that provide higher recall for the same search
+
     // complexity. Plz set this value larger than the max_degree unless you need to build indices really quickly and can
     // somewhat compromise on quality.
     CFG_INT search_list_size;
@@ -48,13 +48,13 @@ class DiskANNConfig : public BaseConfig {
     // in the RAM budget. The sub-graphs are overlayed to build the overall index. This approach can be up to 1.5 times
     // slower than building the index in one shot. Allocate as much memory as your RAM allows.
     CFG_FLOAT build_dram_budget_gb;
-    // Use 0 to store uncompressed data on SSD. This allows the index to asymptote to 100% recall. If your vectors are
+
     // too large to store in SSD, this parameter provides the option to compress the vectors using PQ for storing on
-    // SSD. This will trade off the recall. You would also want this to be greater than the number of bytes used for the
+
     // PQ compressed data stored in-memory
     CFG_INT disk_pq_dims;
     // This is the flag to enable fast build, in which we will not build vamana graph by full 2 round. This can
-    // accelerate index build ~30% with an ~1% recall regression.
+
     CFG_BOOL accelerate_build;
 
     // The ratio of the size reserved for the search cache to the size of the raw data (defined with vec_field_size_gb)
@@ -73,7 +73,7 @@ class DiskANNConfig : public BaseConfig {
     CFG_BOOL use_bfs_cache;
     // The beamwidth to be used for search. This is the maximum number of IO requests each query will issue per
     // iteration of search code. Larger beamwidth will result in fewer IO round-trips per query but might result in
-    // slightly higher total number of IO requests to SSD per query. For the highest query throughput with a fixed SSD
+
     // IOps rating, use W=1. For best latency, use W=4,8 or higher complexity search.
     CFG_INT beamwidth;
     // DiskANN uses TopK search to simulate range search by double the K in every round. This is the start K.

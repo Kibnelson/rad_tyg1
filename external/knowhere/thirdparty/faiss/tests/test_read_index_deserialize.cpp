@@ -1536,7 +1536,7 @@ TEST(ReadIndexDeserialize, HNSWValidNeighborsSearchWorks) {
     push_index_header(buf, /*d=*/4, /*ntotal=*/ntotal);
     push_hnsw_with_neighbors(buf, ntotal, npn, neighbors);
 
-    // Flat storage with 4 zero vectors (valid, just not useful for recall)
+
     push_minimal_flat(buf, /*d=*/4, /*ntotal=*/ntotal);
 
     VectorIOReader reader;

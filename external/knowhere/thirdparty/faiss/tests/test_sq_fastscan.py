@@ -3,24 +3,24 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Unit tests for IndexSQFastScan.
+""
 
-Tests cover:
-  - Construction for native 4-bit types only
-  - Rejection of non-4-bit types
-  - Train / add / search round-trip
-  - Recall parity with IndexScalarQuantizer (within expected bounds)
-  - Conversion constructor from IndexScalarQuantizer
-  - Reset clears state
-  - Edge cases: k=1, single vector, zero vectors, odd dimensions
-  - Inner product metric
-  - sa_encode / sa_decode consistency
-  - I/O round-trip
-  - Factory strings
-  - get_distance_computer
-  - range_search
-"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 from __future__ import absolute_import, division, print_function
 
@@ -109,7 +109,7 @@ class TestSQFastScanTrainAddSearch(unittest.TestCase):
 
 
 class TestSQFastScanRecallParity(unittest.TestCase):
-    """IndexSQFastScan recall should match IndexScalarQuantizer for 4-bit."""
+    ""
 
     def setUp(self):
         self.d = 64
@@ -120,7 +120,7 @@ class TestSQFastScanRecallParity(unittest.TestCase):
         self.D_gt, self.I_gt = gt_index.search(self.ds.get_queries(), 10)
 
     def test_native_4bit_parity(self):
-        """Native 4-bit: FastScan should match SQ recall exactly."""
+        ""
         for name, qtype in NATIVE_4BIT:
             with self.subTest(qtype=name):
                 sq = faiss.IndexScalarQuantizer(self.d, qtype)

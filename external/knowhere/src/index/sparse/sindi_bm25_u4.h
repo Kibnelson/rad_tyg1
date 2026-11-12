@@ -83,7 +83,7 @@ struct Bm25U4Lut {
 // Minimize sum_t histogram[t] * (g(t) - g(decode[encode[t]]))^2, where
 // g(t) = (k1 + 1) * t / (t + k1) is the BM25 TF factor at dl == avgdl.
 // At this reference length b cancels; actual search still uses original document
-// lengths. The fit is globally optimal for this binning objective, not for recall.
+
 // Stable ties choose lower representatives and earlier split points. Empty bins
 // have a deterministic lowest representative. The returned LUT includes a complete
 // encoder, so even TFs absent from the histogram have a defined code.

@@ -74,7 +74,7 @@ def search_test(host="127.0.0.1", index_type="HNSW"):
                 result_id.append(hit.entity.get("int64"))
             result_ids.append(result_id)
 
-        # calculate recall
+
         true_ids = neighbors[:nq, :topK]
         sum_radio = 0.0
         for index, item in enumerate(result_ids):

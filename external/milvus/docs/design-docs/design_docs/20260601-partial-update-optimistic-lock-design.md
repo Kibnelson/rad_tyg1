@@ -729,20 +729,6 @@ makes a later CAS C3 on PK `b` of L wait until C1 and then L have finished,
 while a CAS on a PK outside L proceeds at once. A write never waits merely
 because its PKs hash alike; every link in a chain is a real PK overlap.
 
-Strict order has a throughput cost on hot PKs. A waiting write keeps its place
-on all of its PKs, so later overlapping writes wait for it although it holds
-nothing yet, and waiting CAS commits form chains. For CAS commits of `d` PKs
-that arrive at rate `λ` on a hot set of `n` PKs and hold their PKs for `h`, a
-new CAS overlaps about `λ·T·d²/n` commits still in line, where `T` is the time
-a commit spends waiting plus `h`. Once `λ·h·d²/n` grows past roughly 0.6,
-chains grow faster than they drain and waits grow without bound. This is a
-cliff rather than a slope: in a simulation with `n` = 1,000, `d` = 10 and
-`h` = 20 ms, median CAS waits stayed in the tens of milliseconds up to about
-300 CAS/s, passed 0.3 s at 320 CAS/s and diverged by 340 CAS/s; with
-`h` = 3 ms the knee lies between 2,000 and 3,000 CAS/s. Single-PK CAS commits
-are not affected. A large ordinary write on the hot set adds to this: the
-commits that arrive while it waits queue behind it and then run in order, and
-small ordinary writes on the hot set inherit the chains.
 
 Lock disciplines that let waiters be overtaken tolerate more traffic in this
 regime and were considered:
@@ -1169,12 +1155,6 @@ RWMutex is writer-preferring) can delay later appends, including TimeTick
 messages, until the appends admitted before it finish; this already happened
 when CAS held the vchannel lock exclusively.
 
-Writes and commits waiting for row locks have not allocated a timestamp and
-hold no acker. Unrelated acknowledged writes can advance the PChannel
-confirmation watermark during that wait. An actual in-flight WAL append still
-holds its acker and can delay confirmation and consumer visibility across the
-PChannel. Benchmarks should distinguish lock-queue delay from this WAL
-persistence delay and measure both alongside write throughput and tail latency.
 
 The required PK-index budget is approximately:
 
@@ -1283,8 +1263,6 @@ Focused tests must verify ordering and observable concurrency, including:
 - exclusive DDL still excludes writes and performs its existing transaction
   cleanup, while local CAS never calls that cleanup path.
 
-These checks establish synchronization behavior. They do not establish an
-end-to-end throughput gain; production-scale benchmarks remain necessary.
 
 ## Open Questions
 

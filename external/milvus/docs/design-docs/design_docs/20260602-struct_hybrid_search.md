@@ -222,9 +222,6 @@ topk_avg  Average the best K returned element scores for the row.
 `topk` is required for `topk_sum` and `topk_avg`, and invalid for strategies that
 do not use it.
 
-Collapse operates on the returned element hits from that sub-search. It does not
-scan every element in a row after ANN search. Therefore, the sub-search `limit`
-controls both recall and the number of elements available for aggregation.
 
 Metric direction must be respected:
 

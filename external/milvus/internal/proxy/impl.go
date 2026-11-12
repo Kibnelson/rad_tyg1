@@ -2639,7 +2639,7 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 		if errors.Is(merr.Error(rsp.GetStatus()), merr.ErrInconsistentRequery) {
 			return true, merr.Error(rsp.GetStatus())
 		}
-		// search for ground truth and compute recall
+
 		if isRecallEvaluation && merr.Ok(rsp.GetStatus()) {
 			var rspGT *milvuspb.SearchResults
 			rspGT, _, _, _, err = node.search(ctx, request, false, true)

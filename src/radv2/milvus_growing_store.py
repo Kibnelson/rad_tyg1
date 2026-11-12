@@ -27,7 +27,7 @@ def band_configuration(mh_lsh_band=None):
     if type(bands) is not int or bands not in (14,28) or 112%bands:
         raise ValueError('Use mh_lsh_band 14 or 28, dividing the 112-position signature')
     return (dict(mh_signature_length=112,mh_element_bit_width=32,mh_lsh_band=14,
-                 mh_lsh_rows_per_band=8,topk=32) if bands==14 else {})
+                 mh_lsh_rows_per_band=8,topk=4) if bands==14 else {})
 
 
 class GrowingMilvus:
@@ -315,9 +315,9 @@ class GrowingMilvus:
                 profiles.append(self.synchronize(owner,group[-1]['minhash_signature']))
         return profiles
 
-    def search(self,data,topk=32,refine_k=160):
-        if self.band_configuration and topk!=self.band_configuration['topk']:
-            raise ValueError('Milvus band profile requires topk=32')
+    def search(self,data,topk=4,refine_k=160):
+        if type(topk) is not int or topk != 4:
+            raise ValueError('Milvus band profile requires topk=4')
         if not data: return [],[],0.
         if not self.ntotal: return [[] for _ in data],[],0.
         searcher=Searcher(self.clients,COLLECTION,False,topk,refine_k,self.mode=='refined')

@@ -109,21 +109,21 @@ SortHashKV(const std::shared_ptr<KVPair[]> kv_code, size_t rows, size_t band);
 Status
 MinhashConfigCheck(const size_t dim, const DataFormatEnum data_type, const uint32_t fun_type, const BaseConfig* cfg,
                    const BitsetView* bitset);
-/**
- * @brief returning LSH band hit results on a specified number of vectors as MinHash LSH does
- *
- * @param x Pointer to query vector data containing vectors to search for
- * @param y Pointer to base dataset
- * @param size_in_bytes minhash vector size in bytes
- * @param element_size_in_bytes sizeof (minhash vector element)
- * @param mh_lsh_band Number of LSH bands, used to control the balance between recall and precision
- * @param mh_lsh_r Size of LSH band
- * @param ny Number of vectors in the base dataset
- * @param topk Number of most similar results to return
- * @param bitset Bitset view for filtering vectors that should not be searched (marked vectors will be skipped)
- * @param vals Output parameter: array to store returned similarity scores
- * @param ids Output parameter: array to store returned vector IDs
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 void
 MinHashLSHHitByNy(const char* x, const char* y, size_t size_in_bytes, size_t element_size_in_bytes, size_t mh_lsh_band,
                   size_t mh_lsh_r, size_t ny, size_t topk, const BitsetView& bitset, float* vals, int64_t* ids);

@@ -459,9 +459,6 @@ The implementation is considered correct when:
   basePath. For a column with low churn this is exactly the cost we
   want to avoid.
 
-- **Per-value object on the chunk manager (one S3 key per LOB).**
-  Rejected: real object-store per-object overhead destroys throughput
-  for millions of medium-sized values.
 
 - **Use Parquet for LOB files (the previous prototype).** Rejected:
   weaker compression on long opaque strings, and Parquet's random-row

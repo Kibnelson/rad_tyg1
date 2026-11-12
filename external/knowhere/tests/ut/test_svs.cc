@@ -74,7 +74,7 @@ TEST_CASE("Test SVS Flat Build and Search", "[svs][flat]") {
         auto ids = res.value()->GetIds();
         auto dist = res.value()->GetDistance();
 
-        // brute-force index should have perfect recall
+
         for (int64_t i = 0; i < nq; i++) {
             REQUIRE(ids[i * topk] == gt_ids[i * topk]);
         }

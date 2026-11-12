@@ -120,7 +120,6 @@ For L1 Segments, we don't need primary key indexing and can use Bloom Filters fo
     - 10,000 Bloom Filters: Sequential querying required, average latency ~10,000 × 10 nanoseconds = 0.1 milliseconds
     - **Performance Gap**: Primary key index query speed is approximately 500 times faster than the Bloom filter approach
   
-  - **Throughput**:
     - Primary Key Index: ~10-20 million queries per second per node
     - Bloom Filter Approach: ~1,000 queries per second per node
     - **Advantage**: Primary key index supports higher query loads in high-concurrency scenarios

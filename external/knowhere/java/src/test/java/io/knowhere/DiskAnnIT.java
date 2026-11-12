@@ -155,7 +155,7 @@ public class DiskAnnIT {
             }
         }
         // DiskANN is approximate; isolated points need not be reachable from its graph entry point.
-        // Follow the native DiskANN tests: compare recall with brute force on distributed samples.
+
         assertTrue("DiskANN recall: " + hits + "/" + queries * topK, hits >= queries * topK * 0.95);
         System.out.println("DiskANN " + (excluded == null ? "unfiltered" : "filtered")
                 + " recall: " + hits + "/" + queries * topK);

@@ -288,7 +288,7 @@ func main() {
 					if queryCount%100 == 0 {
 						fmt.Printf("  [%s] Executed %d queries\n", dbCfg.name, queryCount)
 					}
-					// Random QPS between 3-10 per client
+
 					qps := 3 + rand.Intn(8) // 3 to 10
 					sleepMs := 1000 / qps
 					time.Sleep(time.Duration(sleepMs) * time.Millisecond)

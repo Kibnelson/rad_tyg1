@@ -8,7 +8,7 @@ import (
 
 // corpusExprs is a broad set of syntactically-valid expressions, simple to
 // complex, used to (a) prove the SLL-first two-stage parse yields the exact same
-// tree as a pure LL parse for every shape, and (b) benchmark parse throughput.
+
 // Grown in batches.
 var corpusExprs = []struct {
 	name string

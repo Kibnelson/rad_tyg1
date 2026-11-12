@@ -124,27 +124,6 @@ memray run --live pytest tests/benchmark/test_search_bench.py::test_search_float
 
 ## 6. Complete Workflow
 
-```bash
-# Step 1: Install dependencies
-uv sync --group dev
-
-# Step 2: Run timing benchmarks (fast, ~minutes)
-pytest tests/benchmark/ --benchmark-only
-
-# Step 3: Identify slow tests from benchmark results
-
-# Step 4: CPU profile specific slow tests
-py-spy record -o cpu_slow_test.svg -- pytest tests/benchmark/test_search_bench.py::test_slow_one -v
-
-# Step 5: Memory profile tests with large results
-memray run -o mem_large.bin pytest tests/benchmark/test_search_bench.py::test_large_results -v
-memray flamegraph mem_large.bin
-
-# Step 6: Analyze results and fix bottlenecks
-
-# Step 7: Re-run benchmarks and compare with baseline
-pytest tests/benchmark/ --benchmark-only --benchmark-compare=baseline
-```
 
 ## Expected Bottlenecks
 

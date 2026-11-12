@@ -192,7 +192,7 @@ func (t *SearchTask) IsTopkReduce() bool {
 	return t.isTopkReduce
 }
 
-// IsRecallEvaluation reports whether the search ran in recall-evaluation mode.
+
 func (t *SearchTask) IsRecallEvaluation() bool {
 	return t.isRecallEvaluation
 }

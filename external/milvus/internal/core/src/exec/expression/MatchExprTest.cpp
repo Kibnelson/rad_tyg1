@@ -1919,7 +1919,7 @@ class SealedMatchExprTest : public ::testing::Test {
         return expected;
     }
 
-    // Verify retrieve results - check both precision and recall
+
     void
     VerifyRetrieveResults(const proto::segcore::RetrieveResults* result,
                           const std::string& match_type_name,

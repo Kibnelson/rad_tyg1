@@ -26,22 +26,22 @@ struct IcmEncoderFactory;
 
 } // namespace lsq
 
-/** Implementation of LSQ/LSQ++ described in the following two papers:
- *
- * Revisiting additive quantization
- * Julieta Martinez, et al. ECCV 2016
- *
- * LSQ++: Lower running time and higher recall in multi-codebook quantization
- * Julieta Martinez, et al. ECCV 2018
- *
- * This implementation is mostly translated from the Julia implementations
- * by Julieta Martinez:
- * (https://github.com/una-dinosauria/local-search-quantization,
- *  https://github.com/una-dinosauria/Rayuela.jl)
- *
- * The trained codes are stored in `codebooks` which is called
- * `centroids` in PQ and RQ.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 struct LocalSearchQuantizer : AdditiveQuantizer {
     size_t K; ///< number of codes per codebook
 

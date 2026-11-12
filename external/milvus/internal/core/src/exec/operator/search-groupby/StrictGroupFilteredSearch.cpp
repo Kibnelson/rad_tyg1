@@ -114,7 +114,7 @@ struct GroupByMap {
         if (it->second >= group_size_) {
             //we ignore following input no matter the distance as knowhere::iterator doesn't guarantee
             //strictly increase/decreasing distance output
-            //but this should not be a very serious influence to overall recall rate
+
             return false;
         }
 

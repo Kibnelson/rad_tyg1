@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 POLICY = 'milvus_end_group_sealing_v1'
 PROFILE = dict(mode='approximate', mh_signature_length=112, mh_element_bit_width=32,
-               mh_lsh_band=14, mh_lsh_rows_per_band=8, topk=32)
+               mh_lsh_band=14, mh_lsh_rows_per_band=8, topk=4)
 _HOOK_LOCK = threading.RLock()
 
 
@@ -241,16 +241,16 @@ def validate_group_layout(segments, expected, capacity, closed=False):
         growing_segments=sum(row['state'] == 'Growing' for row in retained), segments=retained)
 
 
-def create_store_class(store_module, capacity, policy=POLICY, *, topk=32):
+def create_store_class(store_module, capacity, policy=POLICY, *, topk=4):
     """Return a scoped subclass; importing this module never imports a native SDK."""
     require(type(capacity) is int and capacity > 0, 'Use a positive group capacity')
     require(isinstance(policy, str) and re.fullmatch(r'[a-z][a-z0-9_]+', policy), 'Invalid group policy')
-    require(type(topk) is int and topk in (4, 32), 'Use the reviewed topk4 or legacy topk32 profile')
+    require(type(topk) is int and topk == 4, 'Use the topk4 profile')
     profile = dict(PROFILE, topk=topk)
     base, servers = store_module.GrowingMilvus, store_module.Servers
     with _HOOK_LOCK:
         original_band = getattr(store_module, 'band_configuration', None)
-    require(topk == 32 or callable(original_band), 'Prepared topk4 requires the qualified band-profile constructor')
+    require(callable(original_band), 'Topk4 requires the qualified band-profile constructor')
 
     def selected_band(value=None):
         result = original_band(value)
@@ -305,7 +305,7 @@ def create_store_class(store_module, capacity, policy=POLICY, *, topk=32):
             with _HOOK_LOCK:
                 previous_band = getattr(store_module, 'band_configuration', None)
                 if original_band is not None:
-                    store_module.band_configuration = selected_band if topk != 32 else original_band
+                    store_module.band_configuration = selected_band
                 try:
                     super().__init__(root, layout, cpus, timeout, resume, capacity, mode, mh_lsh_band)
                 finally:

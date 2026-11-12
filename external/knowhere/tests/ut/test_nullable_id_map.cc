@@ -3958,7 +3958,7 @@ TEST_CASE("Growing search preserves the prepared public ID boundary", "[growing_
     json[knowhere::indexparam::NPROBE] = 1;
     if (scann) {
         json[knowhere::indexparam::SUB_DIM] = 2;
-        // Refine every possible candidate, removing approximate recall as a
+
         // reason the newly added exact match could be absent from the control.
         json[knowhere::indexparam::REFINE_RATIO] = static_cast<float>(initial_rows + 1);
     } else {

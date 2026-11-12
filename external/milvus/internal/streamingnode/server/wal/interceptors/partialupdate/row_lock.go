@@ -51,7 +51,7 @@ const rowLockScanChunk = 4096
 // through real overlaps and can delay a write behind one it shares no PK with.
 // A waiting write keeps its place on all of its PKs, so heavy multi-PK CAS
 // traffic on a small hot set forms long chains; the design doc describes the
-// resulting throughput ceiling, which is lower than with lock disciplines that
+
 // let waiters be overtaken. Every wait also ends when its context is canceled.
 // In production that context is the WAL append context, which the WAL detaches
 // from the client: client cancellation does not reach a wait, which ends when

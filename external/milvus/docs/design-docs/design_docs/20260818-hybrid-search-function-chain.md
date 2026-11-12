@@ -60,11 +60,6 @@ them silently discarded before plan generation. This change adds the field to
 the compact public request; the internal QueryNode request continues to carry
 the validated chain only through its serialized `PlanNode`.
 
-The top-level L2 API must replace the entire ranker path rather than execute
-after an independently selected ranker. Otherwise two independent components
-would own candidate fusion, score semantics, ordering, and truncation. Nested
-L0/L1 is different: it belongs to one recall source and intentionally executes
-before whichever top-level rerank source is selected.
 
 ## Goals
 
@@ -319,7 +314,6 @@ Nested L0/L1 compatibility is narrower: legacy rankers and top-level L2
 Function Chains accept nested chains, while top-level `function_score` rejects
 them as `ParameterInvalid` before Proxy generates any sub-search plan.
 
-`rank_params` as a whole is not mutually exclusive with `function_chains`. Existing clients and REST conversion may still send `limit`, `offset`, and `round_decimal`. The public Hybrid L2 Function Chain falls back to the request `limit` and `offset` only when it contains no Limit operator. Request `round_decimal` remains unapplied; users express score rounding explicitly in the chain. Grouping keys remain valid ANN recall controls with the final-result limitation described below. Only meaningful legacy `strategy` and `params` values select a conflicting rerank source.
 
 When `function_chains` is selected, Proxy must not construct the implicit default legacy RRF ranker. The REST handler preserves its existing `rerank` conversion and may serialize `strategy=""` and `params=null` for a chain-only request. Proxy treats only those empty placeholders as absent; meaningful legacy values combined with a chain remain invalid.
 
@@ -335,7 +329,6 @@ The chain must:
 
 L0 and L1 top-level Hybrid chains remain unsupported by this design. Multiple L2 chains remain invalid; callers compose multiple rerank steps as operators in one chain.
 
-Ordinary Search rejects `merge`. Although the runtime can execute Merge with one DataFrame, the ordinary Search API defines a single recall source and must not accidentally expose a meaningless single-input fusion contract.
 
 Each Hybrid sub-search accepts at most one L0 chain and at most one L1 chain.
 It rejects L2, `merge`, duplicate stages, nil chains, and empty chains. Chain
@@ -525,7 +518,6 @@ Hybrid `rank_params.limit`, `offset`, and `round_decimal` continue to be parsed 
 
 Legacy rerank and typed `function_score` paths retain their existing server-built Sort/GroupBy, Limit, and RoundDecimal tail. The ownership change applies only when public `function_chains` selects the rerank path.
 
-Request-level `group_by` remains an ANN recall control. Proxy copies its field and group-size settings into every Hybrid sub-search, so each ANN result is grouped before it reaches Merge. The public Function Chain then operates on those grouped candidate lists and may reorder, filter, or truncate them. Consequently, the final response is not guaranteed to continue satisfying the original group cardinality or ordering constraint.
 
 The Function Chain path does not append a second Proxy-side GroupBy operation. This avoids overriding an explicit user sort or introducing two owners for final ordering. Typed `function_score` and legacy rerank paths retain their existing server-built GroupBy tail and therefore keep their existing final-grouping behavior.
 
@@ -940,16 +932,3 @@ chains. Stable request index is already the ordering contract used by Hybrid
 metrics and Merge weights.
 
 ## Security and Resource Considerations
-
-- Function Chain-required scalar fields remain subject to schema validation and supported-type restrictions.
-- Model credentials continue to come from server-side provider configuration through `ModelExtraInfo`.
-- Existing sub-search top-K and maximum-result-window limits remain the upstream candidate bound.
-- XGBoost model artifacts are referenced through server-managed FileResources;
-  Proxy resolves L2 models and QueryNode resolves L0/L1 models from their
-  locally synchronized FileResource state.
-- Nested L1 Limit may only reduce that bounded candidate set; it cannot increase
-  ANN recall beyond the sub-search limit.
-- Hybrid request validation rejects ambiguous rerank sources before execution.
-- Nested chain static semantic validation remains at QueryNode and runs before
-  ANN search, independently of candidate availability.
-- Merge parameter validation and Arrow ownership are covered by the existing Merge implementation and tests.

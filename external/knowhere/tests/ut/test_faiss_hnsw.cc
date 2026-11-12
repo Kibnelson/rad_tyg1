@@ -295,7 +295,7 @@ test_hnsw(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::DataSetPtr
 
     auto result_loaded = index_loaded.Search(query_t_ds_ptr, conf, bitset_view);
 
-    // calc recall
+
     auto recall = GetKNNRecall(*golden_result, *result.value());
     auto recall_loaded = GetKNNRecall(*golden_result, *result_loaded.value());
 
@@ -364,7 +364,7 @@ test_hnsw_range(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::Data
 
     auto result_loaded = index_loaded.RangeSearch(query_t_ds_ptr, conf, bitset_view);
 
-    // compute the recall
+
     float recall = GetRangeSearchRecall(*golden_result, *result.value());
     float recall_loaded = GetRangeSearchRecall(*golden_result, *result_loaded.value());
 

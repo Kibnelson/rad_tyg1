@@ -904,7 +904,7 @@ class TestMerge(unittest.TestCase):
         self.do_test_ondisk_merge()
 
     def test_ondisk_merge_with_shift_ids(self):
-        # verified that recall is same for test_ondisk_merge and
+
         self.do_test_ondisk_merge(True)
 
 

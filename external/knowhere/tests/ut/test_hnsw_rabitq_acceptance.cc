@@ -1093,7 +1093,7 @@ TEST_CASE("RaBitQ filtered results and exhausted iterators match full-code refer
                     int reachable_topk = 0;
                     for (int i = 0; i < std::min(k, n - excluded); ++i) reachable_topk += reachable.count(expected[i]);
                     // Finite-ef filtered graph search is approximate. Record its
-                    // recall instead of inventing a universal minimum for this
+
                     // random graph fixture. BF routing above must be exact.
                     std::cout << "RBQ_FILTER_RECALL metric=" << metric << " bits=" << bits << " qb=" << qb
                               << " excluded=" << excluded << " hits=" << hits << " reachable_topk=" << reachable_topk

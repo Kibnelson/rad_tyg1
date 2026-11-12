@@ -216,7 +216,7 @@ func TestColdScalarVariants(t *testing.T) {
 }
 
 // TestColdSearchResultFields pins the delegate / rarer SearchResultData fields
-// that the common-case tests skip: iterator results (11), recalls (12),
+
 // highlights (14), element_indices (15), group_by_field_values (17),
 // agg_buckets (18), agg_topks (19).
 func TestColdSearchResultFields(t *testing.T) {

@@ -23,7 +23,7 @@ class SvsVamanaConfig : public BaseConfig {
     CFG_INT svs_graph_max_degree;
     // Window size used during graph construction. Larger values improve graph quality at the cost of build time.
     CFG_INT svs_construction_window_size;
-    // Window size used during search. Larger values improve recall at the cost of latency.
+
     CFG_INT svs_search_window_size;
     // Buffer capacity for the search priority queue.
     CFG_INT svs_search_buffer_capacity;
@@ -172,7 +172,7 @@ class SvsIvfConfig : public BaseConfig {
  public:
     // Number of inverted-list centroids / clusters.
     CFG_INT svs_ivf_nlist;
-    // Number of clusters probed. Larger values improve recall at the cost of latency. Applies at both build time
+
     // (as the index default) and search time.
     CFG_INT svs_ivf_nprobe;
     // Reranking multiplier for compressed datasets. Applies at both build time (as the index default) and search

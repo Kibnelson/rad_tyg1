@@ -124,7 +124,7 @@ test_float_range_multi_hnsw:
 	./benchmark_float_range_multi --gtest_filter="Benchmark_float_range_multi.TEST_HNSW" | tee test_float_range_multi_hnsw.log
 
 ###################################################################################################
-# Test Knowhere float index qps
+
 test_float_qps: test_float_qps_idmap test_float_qps_ivf_flat test_float_qps_ivf_sq8 test_float_qps_ivf_pq test_float_qps_hnsw test_float_qps_scann test_float_qps_diskann
 test_float_qps_cuvs: test_float_qps_cuvs_brute_force test_float_qps_cuvs_ivf_flat test_float_qps_cuvs_ivf_pq test_float_qps_cuvs_cagra
 
@@ -153,7 +153,7 @@ test_float_qps_cuvs_cagra:
 	./benchmark_float_qps --gtest_filter="Benchmark_float_qps.TEST_CUVS_CAGRA" | tee test_float_qps_cuvs_cagra.log
 
 ###################################################################################################
-# Test Knowhere float index range qps
+
 test_float_range_qps: test_float_range_qps_ivf_flat test_float_range_qps_ivf_sq8 test_float_range_qps_hnsw
 
 test_float_range_qps_ivf_flat:
@@ -164,7 +164,7 @@ test_float_range_qps_hnsw:
 	./benchmark_float_range_qps --gtest_filter="Benchmark_float_range_qps.TEST_HNSW" | tee test_float_range_qps_hnsw.log
 
 ###################################################################################################
-# Test Knowhere float index range multi qps
+
 test_float_range_multi_qps: test_float_range_multi_qps_ivf_flat test_float_range_multi_qps_ivf_sq8 test_float_range_multi_qps_hnsw
 
 test_float_range_multi_qps_ivf_flat:
@@ -175,6 +175,6 @@ test_float_range_multi_qps_hnsw:
 	./benchmark_float_range_multi_qps --gtest_filter="Benchmark_float_range_multi_qps.TEST_HNSW" | tee test_float_range_multi_qps_hnsw.log
 
 ###################################################################################################
-# Test Knowhere SIMD APIs' qps
+
 test_simd_qps:
 	./benchmark_simd_qps --gtest_filter="Benchmark_simd_qps.TEST_SIMD" | tee test_simd_qps.log

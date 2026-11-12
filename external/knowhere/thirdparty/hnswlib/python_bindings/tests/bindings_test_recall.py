@@ -27,7 +27,7 @@ bf_index = hnswlib.BFIndex(space='l2', dim=dim)
 hnsw_index.init_index(max_elements=num_elements, ef_construction=200, M=16)
 bf_index.init_index(max_elements=num_elements)
 
-# Controlling the recall for hnsw by setting ef:
+
 # higher ef leads to better accuracy, but slower search
 hnsw_index.set_ef(200)
 
@@ -44,11 +44,11 @@ print("Indices built")
 # Generating query data
 query_data = np.float32(np.random.random((nun_queries, dim)))
 
-# Query the elements and measure recall:
+
 labels_hnsw, distances_hnsw = hnsw_index.knn_query(query_data, k)
 labels_bf, distances_bf = bf_index.knn_query(query_data, k)
 
-# Measure recall
+
 correct = 0
 for i in range(nun_queries):
     for label in labels_hnsw[i]:
@@ -74,7 +74,7 @@ bf_index.load_index(index_path)
 # Query the brute force index again to verify that we get the same results
 labels_bf, distances_bf = bf_index.knn_query(query_data, k)
 
-# Measure recall
+
 correct = 0
 for i in range(nun_queries):
     for label in labels_hnsw[i]:

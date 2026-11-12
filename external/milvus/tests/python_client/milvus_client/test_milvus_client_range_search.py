@@ -239,7 +239,7 @@ class TestRangeSearchCosineShared(TestMilvusClientV2Base):
         """
         client = self._client(alias=self.shared_alias)
         nb = len(self.shared_data)
-        # Use nb//2 to avoid HNSW recall issues while still covering enough results
+
         search_limit = nb // 2
 
         # get inserted data for expression evaluation
@@ -666,7 +666,7 @@ class TestRangeSearchIndependent(TestMilvusClientV2Base):
             ("IVF_FLAT", "IP", DataType.FLOAT16_VECTOR),
             # ("IVF_SQ8", "COSINE", DataType.BFLOAT16_VECTOR),
             # ("IVF_PQ", "L2", DataType.FLOAT_VECTOR),
-            # ("IVF_RABITQ", "COSINE", DataType.FLOAT16_VECTOR),  # recall too low for range search (#32630)
+
             ("HNSW", "COSINE", DataType.BFLOAT16_VECTOR),
             # ("SCANN", "L2", DataType.BFLOAT16_VECTOR),
             ("DISKANN", "COSINE", DataType.FLOAT_VECTOR),

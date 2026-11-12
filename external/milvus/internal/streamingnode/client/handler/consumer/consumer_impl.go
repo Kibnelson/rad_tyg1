@@ -146,8 +146,8 @@ func (c *consumerImpl) execute() {
 }
 
 // recvLoop is the recv arm of the grpc stream.
-// Throughput of the grpc framework should be ok to use single stream to receive message.
-// Once throughput is not enough, look at https://grpc.io/docs/guides/performance/ to find the solution.
+
+
 // recvLoop will always receive message from server by following sequence:
 // - message at timetick 4.
 // - message at timetick 5.

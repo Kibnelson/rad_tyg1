@@ -114,7 +114,7 @@ func NewMergeOpFromReprWithContext(repr *OperatorRepr, buildCtx types.FunctionBu
 
 // ValidateMergeOpRepr validates declarative Merge parameters without requiring
 // runtime search metrics. expectedInputs is supplied by the endpoint from the
-// number of recall inputs, allowing plans with explicit weights to fail before
+
 // execution.
 func ValidateMergeOpRepr(repr *OperatorRepr, expectedInputs int) error {
 	spec, err := parseMergeSpec(repr)

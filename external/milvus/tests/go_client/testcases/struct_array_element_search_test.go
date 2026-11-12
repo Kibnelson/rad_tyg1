@@ -674,7 +674,7 @@ func TestStructArrayElementSearchNoFilter(t *testing.T) {
 			WithOutputFields("id").
 			WithConsistencyLevel(entity.ClStrong))
 		common.CheckErr(t, err, true)
-		// HNSW recall on a small dataset can return slightly fewer than limit; accept ≥ 90%.
+
 		require.GreaterOrEqual(t, rs[0].ResultCount, limit*9/10,
 			"got %d results, expected at least %d", rs[0].ResultCount, limit*9/10)
 
@@ -686,7 +686,7 @@ func TestStructArrayElementSearchNoFilter(t *testing.T) {
 			got[i] = v.(int64)
 		}
 		require.EqualValues(t, gtIDs[0], got[0], "top-1 must match ground truth")
-		// top-K recall ≥ 0.85 (HNSW recall + small-dataset tolerance)
+
 		gtSet := map[int64]bool{}
 		for _, id := range gtIDs {
 			gtSet[id] = true

@@ -413,7 +413,7 @@ class MilvusTableExternalTestBase(TestMilvusClientV2Base):
 
     def _index_and_load(self, client, collection_name, indexes=None):
         # These snapshot-contract tests assert exact hit IDs and distances.
-        # Approximate index coverage must opt in with recall-tolerant assertions.
+
         indexes = indexes or [("vector", "FLAT", "L2", {})]
         index_params = self.prepare_index_params(client)[0]
         for field_name, index_type, metric_type, params in indexes:

@@ -48,7 +48,7 @@ const (
 
 	// NOTrainFlag This flag indicates that there is no need to create any index structure
 	NOTrainFlag uint64 = 1 << 16
-	// KNNFlag This flag indicates that the index defaults to KNN search, meaning the recall rate is 100%
+
 	KNNFlag uint64 = 1 << 17
 	// GpuFlag This flag indicates that the index is deployed on GPU (need GPU devices)
 	GpuFlag uint64 = 1 << 18

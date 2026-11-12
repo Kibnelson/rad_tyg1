@@ -81,24 +81,6 @@ host node's `taskmodel.QueryRunner` (`Proxy.ExecuteQuery` in the root package).
 
 ### Key constructors
 
-```go
-func NewSearchTask(node taskmodel.TaskNode, sched *scheduler.TaskScheduler,
-    ctx context.Context, request *milvuspb.SearchRequest,
-    optimizedSearch bool, isRecallEvaluation bool,
-    tr *timerecord.TimeRecorder) *SearchTask
-
-func NewQueryTask(node taskmodel.TaskNode, ctx context.Context,
-    request *milvuspb.QueryRequest, plan *planpb.PlanNode,
-    retrieveReq *internalpb.RetrieveRequest, cache metacache.Cache) *QueryTask
-
-func NewGetStatisticsTask(node taskmodel.TaskNode, ctx context.Context,
-    request *milvuspb.GetStatisticsRequest, tr *timerecord.TimeRecorder) *GetStatisticsTask
-
-func ConvertHybridSearchToSearch(req *milvuspb.HybridSearchRequest) *milvuspb.SearchRequest
-func PickFieldData(ids *schemapb.IDs, pkOffset map[any]int,
-    fields []*schemapb.FieldData, schema *schemapb.CollectionSchema,
-    collectionID int64) ([]*schemapb.FieldData, error)
-```
 
 ## Host-node contract
 

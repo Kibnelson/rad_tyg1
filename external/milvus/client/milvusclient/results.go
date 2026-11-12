@@ -40,7 +40,7 @@ type ResultSet struct {
 	// AggregationBuckets contains search aggregation results for this query.
 	AggregationBuckets []AggregationBucket
 	Scores             []float32 // distance to the target vector
-	Recall             float32   // recall of the query vector's search result (estimated by zilliz cloud)
+	Recall             float32
 	Err                error     // search error if any
 }
 
@@ -65,7 +65,7 @@ func (rs ResultSet) Slice(start, end int) ResultSet {
 			return column.Slice(start, end)
 		}),
 		AggregationBuckets: rs.AggregationBuckets,
-		// Recall will not be sliced
+
 		Err: rs.Err,
 	}
 
