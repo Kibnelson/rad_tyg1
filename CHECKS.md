@@ -4,9 +4,9 @@ After completing [RUNBOOK.md](RUNBOOK.md), run from the cloned system folder:
 
 ```bash
 .venv/bin/python scripts/check_fixture.py
-.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
+.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/checks \
   --threads 30 --batch-size 100
-cat results/sample/summary.json
+cat results/checks/summary.json
 ```
 
 The fixture check verifies the included input hashes and row counts. Check that
