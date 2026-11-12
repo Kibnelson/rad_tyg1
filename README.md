@@ -46,3 +46,7 @@ record what was checked and where the code came from.
 
 Run commands and the runner default use **30 worker threads**. Use a VM with
 at least 30 available logical CPUs (32 vCPUs recommended).
+
+For reproduction, use the same **GCP C3D high-memory machine: AMD Genoa,
+32 CPU cores and 480 GB RAM**, with **30 workers**. See the
+[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).

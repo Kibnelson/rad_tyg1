@@ -6,6 +6,9 @@ your VM must expose at least 30 available logical CPUs.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
+For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
+
 ## 1. Install and build
 
 ```bash
