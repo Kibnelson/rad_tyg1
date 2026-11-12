@@ -1,5 +1,7 @@
 # Run RAD
 
+This runbook has been tested. Follow the steps in order.
+
 These steps use Ubuntu 24.04, Python 3.12 and an x86-64 CPU with **AVX2 and
 POPCNT**. Run the commands in order. The examples use **30 worker threads**;
 your VM must expose at least 30 available logical CPUs.
