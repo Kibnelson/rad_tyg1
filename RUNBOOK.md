@@ -5,6 +5,9 @@ with **AVX2 and POPCNT**. Python 3.10–3.12 is supported.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
+For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
+
 ## 1. Install and build
 
 ```bash
