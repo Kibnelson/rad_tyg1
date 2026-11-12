@@ -1,5 +1,7 @@
 # Test and run
 
+This runbook has been tested. Follow the steps in order.
+
 These commands target **Ubuntu 24.04 with Python 3.12**. Use Linux x86-64
 with **AVX2 and POPCNT**. Python 3.10–3.12 is supported.
 

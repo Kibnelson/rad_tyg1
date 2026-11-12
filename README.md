@@ -1,8 +1,10 @@
 # SIMD-DPK: native full-reference deduplication
 
-This branch checks incoming documents against documents already kept, then
-adds those it does not identify as duplicates. Every input document is checked
-in order, using the original SIMD-DPK full-reference engine.
+SIMD-DPK reimplements [IBM Data Prep Kit's MinHash/LSH fuzzy-deduplication
+algorithm](https://github.com/data-prep-kit/data-prep-kit/blob/dev/transforms/universal/fdedup/README.md)
+in C++ with SIMD-accelerated signature comparisons. It checks incoming documents
+against those already kept, then adds those it does not identify as duplicates.
+Every input document is checked in order by the standalone full-reference engine.
 
 Start with the [runbook](RUNBOOK.md). The included 320-document test dataset
 needs no AWS account. The runbook then shows how to download and test more
