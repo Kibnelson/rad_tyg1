@@ -36,6 +36,10 @@ Use Ubuntu 24.04, Python 3.12 and an x86-64 VM with AVX2, POPCNT and at least
 is recommended. See [MACHINE_SPECS.md](MACHINE_SPECS.md) for memory, disk and
 the additional CPU instructions needed by each system.
 
+For reproduction, use the same **GCP C3D high-memory machine with AMD Genoa,
+32 CPU cores and 480 GB RAM**, with **30 workers** used for runs. See the
+[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).
+
 ```bash
 sudo apt-get update
 sudo apt-get install -y git tmux build-essential cmake ninja-build libopenblas-dev python3.12 python3.12-dev python3.12-venv
