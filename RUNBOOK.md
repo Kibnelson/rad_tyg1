@@ -6,6 +6,9 @@ more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
+For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
+
 ## 1. Get the code
 
 ```bash
