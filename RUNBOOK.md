@@ -1,5 +1,7 @@
 # Test and run
 
+This runbook has been tested. Follow the steps in order.
+
 These commands target **Ubuntu 24.04 with Python 3.12**. Use Linux x86-64
 with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT and BMI2. Python
 3.10–3.12, CMake ≥3.24, Ninja and a C++20 compiler are supported.
