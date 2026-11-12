@@ -1,7 +1,5 @@
 {
   "system": "faiss_jaccard",
-  "source_revision": "a4b78aaee37dea08662c36d97170f0e45cdbce7a",
-  "native_faiss_revision": "a76c9dcf4e015b199e3d4d667f47d15c513899e7",
   "copied_source_sha256": {
     "engine/mh_jaccard.py": "9c42e6d6360f7ae7708ace79e1ed61ef31dff6fe146efbcd8f33324af38327f4",
     "engine/encoding.py": "426044292a9de09ff3e6f081915a347daf33840478836e4976395fd6690bf5dc",
@@ -1131,9 +1129,8 @@
     "vendor/faiss/faiss/gpu/utils/blockselect/BlockSelectFloatT512.cu": "40a5d9c6e6a45f15c3378fb59fe0253597188eddc378894244366416e388c6ac",
     "vendor/faiss/faiss/gpu/utils/blockselect/BlockSelectFloat32.cu": "fa4fdefc35f63b7dbdfec5cc68806c45fb9b7d44322564a7a466c35fb38a47ee"
   },
-  "scope": "Bundled encoding/native engines with a portable streaming entry point. Documentation, comments and notebook display outputs shortened; executable expressions retained.",
-  "source_note_changes": "SOURCE_NOTE_CHANGES.json",
-  "copied_source_sha256_scope": "SHA256 of current distributed file bytes. Original hashes for shortened source notes are recorded in SOURCE_NOTE_CHANGES.json.",
+  "scope": "Bundled MinHash encoder, native SIMD batch filter and modified raw-MinHash Jaccard Faiss engine with a JSONL streaming entry point.",
+  "copied_source_sha256_scope": "SHA256 hashes of the current distributed file bytes.",
   "public_profile": {
     "M": 96,
     "corpus_ef_construction": 384,

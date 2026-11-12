@@ -1,6 +1,6 @@
 # Test and run
 
-This runbook has been tested. Follow the steps in order.
+Follow the steps in order to build the native engine and run the included sample.
 
 These commands target **Ubuntu 24.04 with Python 3.12**. Use Linux x86-64
 with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT and BMI2. Python
@@ -8,7 +8,7 @@ with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT and BMI2. Python
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
-For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+For reproduction, use the [reference GCP setup](MACHINE_SPECS.md#reference-gcp-setup):
 AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
 
 ## 1. Install and build
