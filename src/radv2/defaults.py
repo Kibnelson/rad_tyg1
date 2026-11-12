@@ -1,7 +1,7 @@
 """Shared defaults for the public RAD runtime."""
 DISTANCE_MODE = 'cache_simd'
 PARTITION_CAPACITY = '1M'
-HNSW_M = 64
+HNSW_M = 96
 EF_SEARCH = 150
 EF_CONSTRUCTION = 128
 APPLICATION_WORKERS = 30

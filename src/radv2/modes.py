@@ -1,4 +1,4 @@
-"""Runtime distance modes compiled together in the V2 Faiss extension."""
+"""Runtime distance modes compiled together in the bundled Faiss extension."""
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,7 +29,7 @@ def metric_for_mode(mode):
         raise ValueError(f'Unknown distance mode {mode!r}; choose from {tuple(MODES)}')
     name = MODES[mode][0]
     if not hasattr(faiss, name):
-        raise RuntimeError('Rebuild V2 Faiss once with scripts/setup.py; runtime distance modes are missing')
+        raise RuntimeError('Rebuild the bundled Faiss extension with bash scripts/setup.sh; runtime distance modes are missing')
     return getattr(faiss, name)
 
 
@@ -45,7 +45,7 @@ def validate_mode(mode, bits):
     _, cached, simd = MODES[mode]
     if simd and not avx512_vpopcnt_available():
         raise UnsupportedDistanceMode(f'{mode} requires AVX-512 VPOPCNTDQ; this CPU cannot execute it. '
-                           'Choose a scalar mode or run on the Genoa VM.')
+                           'Choose a scalar mode or use a compatible AMD Genoa VM with AVX-512 VPOPCNTDQ.')
     if cached and bits > 65535:
         raise ValueError('Cached modes require at most 65535 bitmap bits for uint16 population counts')
 
