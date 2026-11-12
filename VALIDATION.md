@@ -1,16 +1,14 @@
 # Installation checks
 
-These are functional checks on the included 320-row fixture, not benchmark
-throughput or recall results. Earlier native sample checks used **four workers**
-on a Linux x86-64 host with 16 available CPUs and Python 3.10. The current
-runbooks request **30 workers**; those earlier checks are not 30-worker
-performance measurements.
+These notes record installation and functional checks on the included sample.
+The runbooks use 30 worker threads; local checks use the resources available
+on the validation host.
 
 | Branch | Checks completed |
 |---|---|
 | [rad](https://github.com/Kibnelson/rad_tyg1/blob/rad/VALIDATION.json) | Fresh native build; scalar-distance fixture; counts, partition rollover and checkpoint reload |
 | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/VALIDATION.md) | Fresh native build; full-reference fixture; counts and one decision per input |
-| [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/VALIDATION.md) | Fresh native build; raw-MinHash distances, search, save/reload and top40 fixture |
+| [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/VALIDATION.md) | Native build; raw-MinHash distances, top-k4 search and save/reload |
 | [milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md) | Source integrity, SDK, toolchains, SIMD and healthy etcd/MinIO; **full custom-server build and streaming fixture pending** |
 
 The validation CPU lacks AVX-512 VPOPCNTDQ, so RAD's `cache_simd` kernel was

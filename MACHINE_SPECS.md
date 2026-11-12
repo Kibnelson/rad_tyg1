@@ -71,13 +71,8 @@ Google documents [CPU features](https://docs.cloud.google.com/compute/docs/cpu-p
 and [minimum CPU platform selection](https://docs.cloud.google.com/compute/docs/instances/specify-min-cpu-platform).
 Do not assume every machine with the same vCPU count exposes the same instructions.
 
-## Earlier validation checks
+## Installation checks
 
-The public RAD scalar, SIMD-DPK and Faiss native tests passed on a Linux x86-64
-host with 16 available logical CPUs and about 62 GiB total RAM, using Python 3.10
-and four worker threads for those earlier sample checks. Current run commands
-use 30 workers; the earlier checks were not 30-worker performance measurements.
-The host lacks VPOPCNTDQ, so RAD's SIMD
-kernel was not tested there. Milvus's SDK, services and setup checks passed;
-its full native server test remains pending. The recommended Ubuntu 24.04/
-Python 3.12 setup path is separate from those recorded host tests.
+See the [installation checks](https://github.com/Kibnelson/rad_tyg1/blob/main/VALIDATION.md)
+for the checks completed on each branch.
+Run the CPU check on your own VM before choosing a distance kernel or building.
