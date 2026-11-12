@@ -1,6 +1,6 @@
 # Run RAD
 
-This runbook has been tested. Follow the steps in order.
+Follow the steps in order to build the native engine and run the included sample.
 
 These steps use Ubuntu 24.04, Python 3.12 and an x86-64 CPU with **AVX2 and
 POPCNT**. Run the commands in order. The examples use **30 worker threads**;
@@ -8,7 +8,7 @@ your VM must expose at least 30 available logical CPUs.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
-For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+For reproduction, use the [reference GCP setup](MACHINE_SPECS.md#reference-gcp-setup):
 AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
 
 ## 1. Install and build

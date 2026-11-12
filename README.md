@@ -28,7 +28,7 @@ The runbook passes `--distance-mode cache_scalar`, which needs AVX2 and POPCNT.
 The runner defaults to `cache_simd` if that option is omitted; this kernel
 additionally requires AVX-512 VPOPCNTDQ. The chosen kernel is recorded in the results.
 
-## Results
+## Saved files
 
 `summary.json` shows document counts, settings, and total documents divided by
 processing time. `batches.csv` gives counts, stage timings and partition visits
@@ -42,8 +42,8 @@ creation, routing/search/merge, duplicate decisions and insertion. Writing
 results/checkpoints and setup/download/build time are excluded. There are no
 separate warmup searches in this public runner.
 
-[Native test results](VALIDATION.json) and [source provenance](PROVENANCE.md)
-record what was checked and where the code came from.
+[CHECKS.md](CHECKS.md) explains how to check the installation.
+[PROVENANCE.md](PROVENANCE.md) describes the bundled source and licenses.
 
 [Machine sizes and CPU check](MACHINE_SPECS.md) cover the sample and larger runs.
 
@@ -52,4 +52,4 @@ at least 30 available logical CPUs (32 vCPUs recommended).
 
 For reproduction, use the same **GCP C3D high-memory machine: AMD Genoa,
 32 CPU cores and 480 GB RAM**, with **30 workers**. See the
-[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).
+[reference GCP configuration](MACHINE_SPECS.md#reference-gcp-setup).
