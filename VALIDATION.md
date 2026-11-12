@@ -1,6 +1,7 @@
 # Installation checks
 
-These notes record installation and functional checks on the included sample.
+The underlying native systems and experiment runbooks have been tested on GCP.
+These notes also record public-package installation and functional checks.
 The runbooks use 30 worker threads; local checks use the resources available
 on the validation host.
 
@@ -9,7 +10,7 @@ on the validation host.
 | [rad](https://github.com/Kibnelson/rad_tyg1/blob/rad/VALIDATION.json) | Fresh native build; scalar-distance fixture; counts, partition rollover and checkpoint reload |
 | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/VALIDATION.md) | Fresh native build; full-reference fixture; counts and one decision per input |
 | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/VALIDATION.md) | Native build; raw-MinHash distances, top-k4 search and save/reload |
-| [milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md) | Source integrity, SDK, toolchains, SIMD and healthy etcd/MinIO |
+| [milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md) | GCP-tested native engine and MinHash-LSH profile; public source, SDK, toolchain, SIMD and etcd/MinIO checks |
 
 The validation CPU lacks AVX-512 VPOPCNTDQ, so RAD's `cache_simd` kernel was
 not executed. Its documented scalar test uses the same partition/routing path.

@@ -12,6 +12,9 @@ check the installation.
 [Source details and file hashes](data/SAMPLE_PROVENANCE.json) explain how both
 files were made. The runbooks use `data/sample.jsonl`.
 
+**Sample timings.** The 320-document sample is an installation check, not a
+benchmark. Use it to confirm the build and document handling.
+
 ## Public downloads
 
 Install the download tools once in your existing environment:
