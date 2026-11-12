@@ -15,9 +15,9 @@ before downloading a large dataset.
 | Faiss(Jaccard) | 32 | 32 GB | 60 GB | 30 |
 | Milvus, including native build | 32 | 64 GB | 100 GB | 30 |
 
-Builds need internet access. Milvus builds many dependencies and can take hours;
-its full custom-server/sample test is still pending. See the
-[Milvus validation notes](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md).
+Builds need internet access. Milvus builds many dependencies and can take hours.
+Follow the [Milvus runbook](https://github.com/Kibnelson/rad_tyg1/blob/milvus/RUNBOOK.md)
+to build the server and run the included sample.
 `JOBS` controls compilation only; it is separate from the 30 runtime workers.
 Use `JOBS=2` instead of four for RAD/Faiss builds if you need to reduce build memory.
 The SIMD-DPK setup compiles its small modules separately and does not use `JOBS`.

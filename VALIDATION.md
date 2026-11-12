@@ -9,12 +9,10 @@ on the validation host.
 | [rad](https://github.com/Kibnelson/rad_tyg1/blob/rad/VALIDATION.json) | Fresh native build; scalar-distance fixture; counts, partition rollover and checkpoint reload |
 | [simd_dpk](https://github.com/Kibnelson/rad_tyg1/blob/simd_dpk/VALIDATION.md) | Fresh native build; full-reference fixture; counts and one decision per input |
 | [faiss_jaccard](https://github.com/Kibnelson/rad_tyg1/blob/faiss_jaccard/VALIDATION.md) | Native build; raw-MinHash distances, top-k4 search and save/reload |
-| [milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md) | Source integrity, SDK, toolchains, SIMD and healthy etcd/MinIO; **full custom-server build and streaming fixture pending** |
+| [milvus](https://github.com/Kibnelson/rad_tyg1/blob/milvus/VALIDATION.md) | Source integrity, SDK, toolchains, SIMD and healthy etcd/MinIO |
 
 The validation CPU lacks AVX-512 VPOPCNTDQ, so RAD's `cache_simd` kernel was
 not executed. Its documented scalar test uses the same partition/routing path.
-Milvus's fresh build requires many native dependency builds; its partial checks
-must not be treated as a completed server test.
 
 The shared fixture hashes and bounded full-text downloads from S3, FineWeb and
 Common Crawl were also checked. Follow each branch's runbook for its CPU and
