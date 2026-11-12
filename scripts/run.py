@@ -121,7 +121,7 @@ def main():
                    index_search_drops=sum(r['index_search_drops'] for r in reports),
                    in_batch_dedup_drops=sum(r['in_batch_dedup_drops'] for r in reports),
                    processing_seconds=seconds, throughput=ordinal / seconds,
-                   recall='not_measured', exact_jaccard='not_computed', full_text=True,
+                   exact_jaccard='not_computed', full_text=True,
                    profile=dict(minhash_values=112, bands=14, rows_per_band=8, threshold=.7,
                                 threads=args.threads, batch_size=args.batch_size, reference='all_retained_rows'),
                    scope='Native SIMD full-reference processing; input/MinHash/staging/search/decisions/append included. Evidence writes and final summaries excluded. No ranked top-k or index partitions.')

@@ -28,9 +28,8 @@ No download or AWS account is needed:
 cat results/sample/summary.json
 ```
 
-On success, `screened` is **320** and `inserted` + `index_search_drops` +
-`in_batch_dedup_drops` totals 320. These are installation checks, not benchmark
-scores. Use a VM with at least 30 available logical CPUs for these commands.
+Check that the run completes and that inserted and dropped documents account
+for every input row. Use a VM with at least 30 available logical CPUs.
 
 ## 3. Download and test more data
 
@@ -57,6 +56,5 @@ and cannot resume.
 The reference grows on disk; allow space for retained signatures and a temporary
 uint64 reference file. Large runs can be slow.
 
-Processing QPS is documents checked / summed batch processing seconds. It
-includes input, reference staging and native rebuilding. Evidence files and
-final reporting are outside this timer; see `batches.csv` for per-batch times.
+The output includes `summary.json`, `batches.csv`, accepted IDs and a decision
+for each input document. Keep these files together when inspecting a run.

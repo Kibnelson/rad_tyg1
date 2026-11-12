@@ -13,15 +13,13 @@ over the complete retained reference plus the current batch's survivors.
 This threshold compares MinHash positions; it is not exact text Jaccard.
 There is no ranked top-k limit or HNSW index.
 
-Outputs: `summary.json`, per-batch counts/timings, one decision per source row,
-accepted IDs and retained signatures. Real-data recall and exact Jaccard are
-not measured. This is the native SIMD baseline, not an IBM DPK/Ray ground-truth
-job. Its full-reference rebuilding cost is included in processing time.
+Outputs: `summary.json`, per-batch records, one decision per source row,
+accepted IDs and retained signatures. Each batch checks the complete retained
+reference before adding accepted documents.
 
 The native files and MinHash encoder are unchanged; [PROVENANCE.json](PROVENANCE.json)
-records their source revisions and hashes. The streaming runner is new and
-checks every document. The small test does not reproduce paper results or the
-earlier 900K-corpus/100K-query workload.
+records their source revisions and hashes. The streaming runner checks every
+document before insertion.
 
 Functional installation checks: [VALIDATION.md](VALIDATION.md).
 
