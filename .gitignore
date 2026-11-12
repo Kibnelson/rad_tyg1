@@ -28,3 +28,12 @@ data/*.parquet
 *.o
 *.a
 *.egg-info/
+
+# Generated run artifacts are local outputs.
+/reports/
+/benchmark_results/
+/runs/
+/checkpoints/
+/VALIDATION.json
+/VALIDATION.md
+/SOURCE_NOTE_CHANGES.json

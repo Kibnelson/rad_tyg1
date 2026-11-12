@@ -1,5 +1,5 @@
 {
-  "branch": "experiments/milvus-minhash-reference",
+  "branch": "milvus",
   "physical_segment_capacity": 1000000,
   "project_file_sha256": {},
   "repositories": {
@@ -8366,5 +8366,5 @@
     }
   },
   "schema_version": 1,
-  "source_policy": "Locally authoritative ordinary source files; separate nested Git histories have no remotes."
+  "source_policy": "Bundled ordinary source files; build and launch verify distributed file hashes."
 }

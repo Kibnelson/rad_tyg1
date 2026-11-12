@@ -7,14 +7,11 @@ no AWS account. [DATASETS.md](DATASETS.md) explains how to download more data
 from public FineWeb/Common Crawl or the existing S3 datasets.
 
 The custom Milvus server, Knowhere library and Python client are included as
-source. Docker runs the local etcd and MinIO services they need. No access to
-the original private repository is required.
+source. Docker runs the local etcd and MinIO services they need.
+The build uses these bundled sources.
 
 Follow [RUNBOOK.md](RUNBOOK.md) to build the server and run the included sample.
-[VALIDATION.md](VALIDATION.md) lists installation checks.
-
-The Milvus native engine and MinHash-LSH configuration were tested on GCP using
-the experiment runbooks. The public runbook uses the same engine and index settings.
+[CHECKS.md](CHECKS.md) gives commands to check the installation.
 
 ## Settings
 
@@ -63,4 +60,4 @@ at least 30 available logical CPUs (32 vCPUs recommended).
 
 For reproduction, use the same **GCP C3D high-memory machine: AMD Genoa,
 32 CPU cores and 480 GB RAM**, with **30 workers**. See the
-[experiment machine configuration](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments).
+[reference GCP configuration](MACHINE_SPECS.md#reference-gcp-setup).

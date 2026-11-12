@@ -1,8 +1,6 @@
 # Run Milvus
 
-The Milvus native engine and MinHash-LSH configuration were tested on GCP using
-the experiment runbooks. This public runbook uses the same engine and index
-settings. Follow the steps in order.
+Follow the steps in order to build the native engine and run the included sample.
 
 Use an x86-64 Ubuntu 24.04 VM with sudo, at least 30 available logical CPUs,
 64 GB RAM and 100 GB free disk for the build. Large datasets and results need
@@ -10,7 +8,7 @@ more disk. The CPU must support AVX-512F/DQ/VL/BW, AVX2 and POPCNT.
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
-For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+For reproduction, use the [reference GCP setup](MACHINE_SPECS.md#reference-gcp-setup):
 AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
 
 ## 1. Get the code

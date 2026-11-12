@@ -7,9 +7,9 @@ logical CPUs**. A **32-vCPU VM** is suitable for the small sample; use the GCP
 configuration below for reproduction. Start with the sample before downloading
 a large dataset.
 
-## GCP machine used for the experiments
+## Reference GCP setup
 
-Use the same GCP configuration when reproducing the runs:
+Use this GCP configuration for larger runs:
 
 | Component | Configuration |
 |---|---|
@@ -21,7 +21,7 @@ Use the same GCP configuration when reproducing the runs:
 | Application workers | 30 (`--threads 30`) |
 
 The machine has 32 CPU cores; runs use 30 workers. Keep the same machine family,
-CPU platform, core count and memory when reproducing the experiments, and use
+CPU platform, core count and memory when comparing runs, and use
 one system and one dataset per VM. Follow the branch's runbook for the software
 environment and input settings. The runbooks use Ubuntu 24.04 and Python 3.12.
 
@@ -98,6 +98,6 @@ Do not assume every machine with the same vCPU count exposes the same instructio
 
 ## Installation checks
 
-See the [installation checks](https://github.com/Kibnelson/rad_tyg1/blob/main/VALIDATION.md)
-for the checks completed on each branch.
+See the [self-check instructions](https://github.com/Kibnelson/rad_tyg1/blob/main/CHECKS.md)
+for commands to check each system after setup.
 Run the CPU check on your own VM before choosing a distance kernel or building.
