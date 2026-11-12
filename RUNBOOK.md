@@ -6,6 +6,9 @@ with **AVX-512F/CD/DQ/BW/VL**, AVX2, F16C, FMA, POPCNT and BMI2. Python
 
 See [MACHINE_SPECS.md](MACHINE_SPECS.md) for small-test and larger-run VM sizes.
 
+For reproduction, use the [GCP experiment machine](MACHINE_SPECS.md#gcp-machine-used-for-the-experiments):
+AMD Genoa, 32 CPU cores, 480 GB RAM and 30 application workers.
+
 ## 1. Install and build
 
 ```bash

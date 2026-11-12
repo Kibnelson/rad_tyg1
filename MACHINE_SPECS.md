@@ -3,8 +3,30 @@
 Use **Ubuntu 24.04 LTS, Python 3.12, an x86-64 CPU and SSD storage**.
 No GPU is needed. The sizes below are starting recommendations, not measured
 minimums. All run commands use **30 worker threads** and need at least **30 available
-logical CPUs**. Provision a **32-vCPU VM**. Start with the 320-document sample
-before downloading a large dataset.
+logical CPUs**. A **32-vCPU VM** is suitable for the small sample; use the GCP
+configuration below for reproduction. Start with the sample before downloading
+a large dataset.
+
+## GCP machine used for the experiments
+
+Use the same GCP configuration when reproducing the runs:
+
+| Component | Configuration |
+|---|---|
+| Provider | Google Cloud Compute Engine |
+| Machine family | C3D high-memory (`c3d-highmem`) |
+| CPU | AMD Genoa, x86-64 |
+| CPU cores | 32 |
+| Memory | 480 GB RAM |
+| Application workers | 30 (`--threads 30`) |
+
+The machine has 32 CPU cores; runs use 30 workers. Keep the same machine family,
+CPU platform, core count and memory when reproducing the experiments, and use
+one system and one dataset per VM. Follow the branch's runbook for the software
+environment and input settings. The runbooks use Ubuntu 24.04 and Python 3.12.
+
+The smaller sizes below are options for installation checks. For reproduction,
+use the GCP configuration above. Run the CPU check before selecting a kernel.
 
 ## Small sample: build and test
 
@@ -24,11 +46,12 @@ The SIMD-DPK setup compiles its small modules separately and does not use `JOBS`
 
 ## Larger runs, up to about 30M documents
 
-Use **one system and one dataset per VM** for timing comparisons. A practical
-starting size is **32 vCPUs, 256 GB RAM and a 1 TB SSD**, with `--threads 30`
+For an exploratory large run, a practical starting size is
+**32 vCPUs, 256 GB RAM and a 1 TB SSD**, with `--threads 30`
 when at least 30 CPUs are available to the process. This leaves room for the OS
 and supporting services. Use the same machine size and thread count for each
-system you compare. A vCPU is a logical CPU, not necessarily a physical core.
+system you compare. For reproduction, use the GCP machine described above.
+A vCPU is a logical CPU, not necessarily a physical core.
 `--threads` sets a worker limit; it does not mean every worker stays busy.
 
 This is a capacity-planning suggestion, not a guarantee that every 30M input
