@@ -8,8 +8,8 @@ system folder on compatible hardware:
 .venv/bin/python scripts/check_milvus_sources.py
 bash scripts/services.sh up
 .venv/bin/python scripts/run.py --input data/sample.jsonl \
-  --output results/sample --threads 30 --batch-size 100 --partition-capacity 1000
-cat results/sample/SUMMARY.json
+  --output results/checks --threads 30 --batch-size 100 --partition-capacity 1000
+cat results/checks/SUMMARY.json
 ```
 
 The source check verifies bundled files against their SHA256 inventory. The
