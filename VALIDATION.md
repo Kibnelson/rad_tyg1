@@ -12,7 +12,7 @@ Fixture SHA256: `e21cb1c105592c5eb55f8f3e246a2dff786816adbc7f625aac7e14e7bbad4bb
 
 ```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 30 --batch-size 100 --partition-capacity 1000
+  --threads 30 --batch-size 100
 ```
 
 Generated binaries, local environments and result files are not committed.
