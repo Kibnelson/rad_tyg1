@@ -31,7 +31,8 @@ No download or AWS account is needed:
 
 ```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 30 --batch-size 100 --partition-capacity 1000
+  --threads 30 --batch-size 100 --partition-capacity 1000 \
+  --ef-construction 384 --ef-search 400 --top-k 4
 cat results/sample/summary.json
 ```
 
@@ -48,7 +49,8 @@ This downloads 100,000 full FineWeb documents, keeping their order:
 .venv/bin/python -m pip install -r requirements-data.txt
 .venv/bin/python scripts/get_data.py fineweb --rows 100000 --output data/fineweb_download.jsonl
 .venv/bin/python scripts/run.py --input data/fineweb_download.jsonl \
-  --output results/fineweb --threads 30 --batch-size 10000 --partition-capacity 100000
+  --output results/fineweb --threads 30 --batch-size 10000 --partition-capacity 100000 \
+  --ef-construction 384 --ef-search 400 --top-k 4
 cat results/fineweb/summary.json
 ```
 
@@ -64,7 +66,7 @@ when repeating a test. Input documents keep their full text.
 Use `tmux new -As faiss-jaccard`, then run the command inside it. `nproc` shows
 your VM's available CPUs; these commands require at least 30. Each run starts
 fresh and cannot resume. The public preset fixes corpus/query efConstruction
-at 128, efSearch at 150 and top-k at 4. Use `--M` and `--cutoff` explicitly to
+at 384, efSearch at 400 and top-k at 4. Use `--M` and `--cutoff` explicitly to
 change graph connectivity or the admission threshold.
 
 Distance ≤30 compares MinHash signatures; it does not guarantee exact Jaccard

@@ -1133,5 +1133,14 @@
   },
   "scope": "Bundled encoding/native engines with a portable streaming entry point. Documentation, comments and notebook display outputs shortened; executable expressions retained.",
   "source_note_changes": "SOURCE_NOTE_CHANGES.json",
-  "copied_source_sha256_scope": "SHA256 of current distributed file bytes. Original hashes for shortened source notes are recorded in SOURCE_NOTE_CHANGES.json."
+  "copied_source_sha256_scope": "SHA256 of current distributed file bytes. Original hashes for shortened source notes are recorded in SOURCE_NOTE_CHANGES.json.",
+  "public_profile": {
+    "M": 96,
+    "corpus_ef_construction": 384,
+    "query_ef_construction": 384,
+    "ef_search": 400,
+    "top_k": 4,
+    "cutoff": 30,
+    "threads": 30
+  }
 }

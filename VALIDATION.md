@@ -1,14 +1,15 @@
 # Installation checks
 
 Setup checks the raw-MinHash distance rule, identity search and native graph
-save/reload. The qualification graph uses M96, efConstruction128, efSearch150
+save/reload. The qualification graph uses M96, efConstruction384, efSearch400
 and top-k4.
 
 After setup, use the included input to check the complete streaming path:
 
 ```bash
 .venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
-  --threads 30 --batch-size 100 --partition-capacity 1000
+  --threads 30 --batch-size 100 --partition-capacity 1000 \
+  --ef-construction 384 --ef-search 400 --top-k 4
 ```
 
 The runner checks that every input document is either inserted, rejected by

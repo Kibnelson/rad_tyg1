@@ -23,8 +23,8 @@ def main():
     parser.add_argument('--partition-capacity', type=int, default=20000000,
                         help='Retained-vector ceiling for this single-graph baseline; increase for larger runs.')
     parser.add_argument('--M', type=int, default=96)
-    parser.add_argument('--ef-construction', type=int, choices=(128,), default=128)
-    parser.add_argument('--ef-search', type=int, choices=(150,), default=150)
+    parser.add_argument('--ef-construction', type=int, choices=(384,), default=384)
+    parser.add_argument('--ef-search', type=int, choices=(400,), default=400)
     parser.add_argument('--top-k', type=int, choices=(4,), default=4)
     parser.add_argument('--cutoff', type=int, default=30)
     args = parser.parse_args()

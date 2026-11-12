@@ -8,8 +8,8 @@ Start with the [runbook](RUNBOOK.md). The included 320-document test dataset
 needs no AWS account. The runbook then shows how to download and test more
 FineWeb documents. [DATASETS.md](DATASETS.md) also covers S3 and Common Crawl.
 
-The public configuration uses **M96, corpus/query efConstruction128,
-efSearch150, top-k4 and distance cutoff30**. There is no
+The public configuration uses **M96, corpus/query efConstruction384,
+efSearch400, top-k4 and distance cutoff30**. There is no
 Bloom routing. The engine stores 112 uint32 MinHash values as 448 big-endian
 bytes and compares matching signature positions, rather than RAD bitmaps.
 

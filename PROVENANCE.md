@@ -15,7 +15,8 @@ distributed hashes for each affected file. The revision identifiers above
 refer to the source snapshots before this cleanup.
 
 The portable JSONL streaming entry point, setup script and short runbook are new.
-They screen all inputs in batches.
+They screen all inputs in batches. The public configuration uses M96,
+corpus/query efConstruction384, efSearch400, top-k4 and distance cutoff30.
 
 MurmurHash3 retains its public-domain notice in `licenses/`. The custom
 research SIMD and encoder files retain their original source headers; no

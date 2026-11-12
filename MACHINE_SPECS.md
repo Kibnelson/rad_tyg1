@@ -55,9 +55,11 @@ A vCPU is a logical CPU, not necessarily a physical core.
 `--threads` sets a worker limit; it does not mean every worker stays busy.
 
 This is a capacity-planning suggestion, not a guarantee that every 30M input
-fits. Full document lengths and saved candidate files change disk use. RAD
-keeps all partitions in RAM, Faiss keeps one growing graph, SIMD-DPK rebuilds
-its full kept-document reference, and Milvus also needs local service storage.
+fits. Full document lengths and saved candidate files change disk use. RAD's
+partitioned design allows all-resident storage or a memory-budgeted working set,
+such as three partitions loaded as needed; the supplied runner uses the
+all-resident policy. Faiss keeps one growing graph, SIMD-DPK rebuilds its full
+kept-document reference, and Milvus also needs local service storage.
 Increase RAM/disk if your input or saved results require it.
 
 ## CPU features matter

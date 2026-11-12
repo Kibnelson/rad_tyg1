@@ -23,7 +23,7 @@ def main():
     index = faiss.IndexBinaryHNSW(3584, 96)
     index.metric_type = faiss.METRIC_MinhashJaccard
     assert index.minhash_jaccard_uses_avx512(), 'Native AVX-512 raw-MinHash kernel unavailable'
-    index.hnsw.efConstruction, index.hnsw.efSearch = 128, 150
+    index.hnsw.efConstruction, index.hnsw.efSearch = 384, 400
     index.add(vectors)
     q = pack_signatures(query)
     dc = index.get_distance_computer()
@@ -41,7 +41,7 @@ def main():
         assert np.array_equal(new_distances, distances) and np.array_equal(new_labels, labels)
     result = dict(actual_native_distance_checked=True, equality_counts=113, identity_hit=True,
                   native_save_reload=True, metric='METRIC_MinhashJaccard', graph_M=96,
-                  ef_construction=128, ef_search=150, top_k=4,
+                  ef_construction=384, ef_search=400, top_k=4,
                   matches78_distance=expected[78], matches77_distance=expected[77],
                   scope='Native distance, identity search and save/reload qualification.')
     (ROOT / 'build/faiss_qualification.json').write_text(json.dumps(result, indent=2) + '\n')
