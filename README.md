@@ -12,7 +12,10 @@ input. [DATASETS.md](DATASETS.md) covers S3, FineWeb and Common Crawl downloads.
 RAD uses MinHash bitmaps and HNSW indexes. Documents fill one partition at a time;
 a full partition stays searchable while new documents enter the next partition.
 Each partition has a Bloom filter that selects which queries need to search it.
-All partitions stay in memory, and selected partitions are searched one at a time.
+Selected partitions are searched one at a time. At the design level, partition
+residency can follow the memory budget: keep all partitions in RAM, or use a
+smaller working set, such as three, and load others as needed. The supplied
+runner uses the all-resident policy.
 
 Defaults: **M96, corpus/query efConstruction128, efSearch150, top4, bitmap cutoff
 D≤30, 10K-document batches and 1M kept documents per partition**. Routing uses

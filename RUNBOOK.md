@@ -61,7 +61,9 @@ Replace `--input` with the file you downloaded. Increase `--rows` for more
 documents and choose new download/result paths. `--max-documents 10000` limits
 a run to its first 10,000 documents. Text is kept in full.
 
-All index partitions stay in RAM, so larger inputs need more memory and disk.
+Size RAM and disk for the input. The [partition memory policy](README.md#how-this-version-works)
+can use all-resident indexes or a smaller working set, such as three partitions,
+in a memory-budgeted variant. The supplied runner uses all-resident indexes.
 The runtime uses 30 workers. The optional `cache_simd` kernel
 requires AVX-512 VPOPCNTDQ. See [README.md](README.md) for settings and result files.
 
