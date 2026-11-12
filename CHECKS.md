@@ -5,10 +5,10 @@ save/reload. After completing [RUNBOOK.md](RUNBOOK.md), run the included input:
 
 ```bash
 .venv/bin/python scripts/check_fixture.py
-.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/sample \
+.venv/bin/python scripts/run.py --input data/sample.jsonl --output results/checks \
   --threads 30 --batch-size 100 --partition-capacity 1000 \
   --ef-construction 384 --ef-search 400 --top-k 4
-cat results/sample/summary.json
+cat results/checks/summary.json
 ```
 
 The fixture check verifies the input hashes and row counts. Check that inserted,
